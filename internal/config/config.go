@@ -33,6 +33,18 @@ type Node struct {
 	// StateDir is where the local database and network journal live. It must be
 	// an absolute path owned by the running user.
 	StateDir string `toml:"state_dir" json:"state_dir"`
+
+	// OverlayAddress is this node's own address inside the tunnel, in CIDR
+	// notation. It is local intent, never negotiated.
+	OverlayAddress string `toml:"overlay_address" json:"overlay_address"`
+
+	// ListenPort is the UDP port WireGuard binds. Zero lets the kernel choose,
+	// which is fine for a client but not for a node peers dial into.
+	ListenPort int `toml:"listen_port" json:"listen_port"`
+
+	// MTU is the tunnel interface MTU. Zero uses the adapter default of 1420,
+	// which leaves room for the WireGuard header inside a 1500-byte path.
+	MTU int `toml:"mtu" json:"mtu"`
 }
 
 // Log configures structured logging.

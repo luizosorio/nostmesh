@@ -3,6 +3,7 @@
 package wireguard
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -223,6 +224,46 @@ func (a *LinuxAdapter) ApplyPeer(ctx context.Context, iface string, spec PeerSpe
 	if err := a.client.ConfigureDevice(iface, wgtypes.Config{Peers: []wgtypes.PeerConfig{peer}}); err != nil {
 		return fmt.Errorf("applying peer %s to %s: %w", spec.PublicKey.Short(), iface, err)
 	}
+
+	// AllowedIPs tell WireGuard which peer may send a given prefix, but they do
+	// not tell the kernel how to reach it. Without a route the interface exists
+	// and the handshake succeeds while traffic fails with "network is
+	// unreachable", so the routes are part of applying a peer.
+	return a.ensurePeerRoutes(iface, spec.AllowedIPs)
+}
+
+// ensurePeerRoutes installs a route per allowed prefix, pointing at the tunnel.
+//
+// A default route is refused here: capturing all traffic would include the
+// tunnel's own transport endpoint and create a loop. Transit is a negotiated
+// service with explicit consent, introduced in MVP 4.
+func (a *LinuxAdapter) ensurePeerRoutes(iface string, allowed []netip.Prefix) error {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return fmt.Errorf("looking up %s for routing: %w", iface, err)
+	}
+
+	for _, prefix := range allowed {
+		if prefix.Bits() == 0 {
+			return fmt.Errorf("%w: refusing to install a default route (%s) for a peer", ErrNotOwned, prefix)
+		}
+
+		destination := &net.IPNet{
+			IP:   net.IP(prefix.Masked().Addr().AsSlice()),
+			Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
+		}
+
+		route := &netlink.Route{
+			LinkIndex: link.Attrs().Index,
+			Dst:       destination,
+			Scope:     netlink.SCOPE_LINK,
+		}
+
+		// Idempotent: an identical route already present is not an error.
+		if err := netlink.RouteAdd(route); err != nil && !errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("routing %s via %s: %w", prefix, iface, err)
+		}
+	}
 	return nil
 }
 
@@ -241,12 +282,62 @@ func (a *LinuxAdapter) RemovePeer(ctx context.Context, iface string, publicKey d
 		return fmt.Errorf("removing peer from %s: %w", iface, err)
 	}
 
+	// Remove the peer's routes first: once the peer is gone the AllowedIPs that
+	// identify them are no longer readable from the device.
+	if err := a.removePeerRoutes(iface, publicKey); err != nil {
+		return err
+	}
+
 	config := wgtypes.Config{Peers: []wgtypes.PeerConfig{{PublicKey: key, Remove: true}}}
 	if err := a.client.ConfigureDevice(iface, config); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("removing peer %s from %s: %w", publicKey.Short(), iface, err)
+	}
+	return nil
+}
+
+// removePeerRoutes takes down the routes installed for one peer.
+//
+// Removing the interface would take its routes with it, but a peer can be
+// removed on its own, and a route left pointing at a peer that no longer exists
+// is exactly the orphaned state the journal exists to prevent.
+func (a *LinuxAdapter) removePeerRoutes(iface string, publicKey domain.WireGuardPublicKey) error {
+	device, err := a.client.Device(iface)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading %s to remove routes: %w", iface, err)
+	}
+
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return fmt.Errorf("looking up %s to remove routes: %w", iface, err)
+	}
+
+	for _, peer := range device.Peers {
+		if !bytes.Equal(peer.PublicKey[:], publicKey[:]) {
+			continue
+		}
+		for _, allowed := range peer.AllowedIPs {
+			route := &netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Dst:       &net.IPNet{IP: allowed.IP, Mask: allowed.Mask},
+				Scope:     netlink.SCOPE_LINK,
+			}
+			// Removing an absent route is not an error: compensation must be
+			// able to run without first checking.
+			if err := netlink.RouteDel(route); err != nil &&
+				!errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
+				return fmt.Errorf("removing route %s from %s: %w", allowed, iface, err)
+			}
+		}
 	}
 	return nil
 }

@@ -1,0 +1,43 @@
+# Gitleaks configuration for NostMesh.
+#
+# The project handles two kinds of key material with opposite sensitivity, and a
+# scanner cannot tell them apart by shape alone: both are 32 bytes.
+#
+#   - Private keys are secret. They must never appear anywhere, and the type
+#     system enforces that (NM-06): they cannot be printed, logged or
+#     serialized, and a single sanctioned escape is guarded by an architecture
+#     test.
+#   - Public keys are not secret. They are exchanged openly and appear in
+#     configuration, documentation and tests by design.
+#
+# This file allows the second while keeping every other rule intact.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "nostmesh-private-key-material"
+description = "A private key must never be committed"
+# Matches a field that names a private key alongside a base64 or hex value.
+regex = '''(?i)(private[_-]?key|privkey|secret[_-]?key|nsec1)["'\s:=]+[A-Za-z0-9+/=]{32,}'''
+tags = ["key", "private"]
+
+[allowlist]
+description = "Public keys and derived test values are not secrets"
+
+paths = [
+  # Test files derive public keys from seeds rather than embedding literals.
+  # The derivation is visible in the source, so there is nothing to leak.
+  '''.*_test\.go$''',
+  # The example configuration carries a deliberately synthetic public key,
+  # documented in examples/README.md.
+  '''examples/nostmesh\.json$''',
+  # This file necessarily contains patterns that look like the things it
+  # describes.
+  '''\.gitleaks\.toml$''',
+]
+
+regexes = [
+  # WireGuard public keys are exchanged openly; they are not credentials.
+  '''public_key["'\s:=]+[A-Za-z0-9+/]{42}[A-Za-z0-9+/=]{1,2}''',
+]

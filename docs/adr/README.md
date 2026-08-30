@@ -35,3 +35,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-06](NM-06-key-separation-and-secret-handling.md) | Key separation and secret handling | Accepted |
 | [NM-07](NM-07-deferred-nostr-key-derivation.md) | Deferred Nostr key derivation | Accepted, must be superseded in M1.1 |
 | [NM-08](NM-08-transactional-network-changes.md) | Transactional network changes | Accepted |
+| [NM-09](NM-09-routes-follow-allowed-ips.md) | Routes follow AllowedIPs | Accepted |
