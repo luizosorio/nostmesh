@@ -33,6 +33,9 @@ func commands() []command {
 		{"version", "Print build information", runVersion},
 		{"config", "Inspect and validate configuration", runConfig},
 		{"identity", "Manage this node's identity", runIdentity},
+		{"status", "Report configured and observed state", runStatus},
+		{"up", "Bring the configured tunnel up", runUp},
+		{"down", "Remove what NostMesh applied", runDown},
 	}
 }
 

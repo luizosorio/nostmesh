@@ -38,18 +38,22 @@ func withNamespace(t *testing.T, fn func()) {
 	if err != nil {
 		t.Fatalf("reading current namespace: %v", err)
 	}
+	defer func() { _ = original.Close() }()
+
+	// Creating a network namespace needs CAP_SYS_ADMIN, not just NET_ADMIN.
+	// Under Docker that means --privileged or --cap-add SYS_ADMIN; see
+	// docs/development.md. Skip before installing the restore deferral, so a
+	// namespace that was never entered is not restored.
+	created, err := netns.New()
+	if err != nil {
+		t.Skipf("cannot create a network namespace (needs CAP_SYS_ADMIN): %v", err)
+	}
 	defer func() {
 		if err := netns.Set(original); err != nil {
 			t.Errorf("restoring namespace: %v", err)
 		}
-		_ = original.Close()
+		_ = created.Close()
 	}()
-
-	created, err := netns.New()
-	if err != nil {
-		t.Skipf("cannot create a network namespace (need CAP_NET_ADMIN): %v", err)
-	}
-	defer func() { _ = created.Close() }()
 
 	fn()
 }
