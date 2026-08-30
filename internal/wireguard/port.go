@@ -9,10 +9,28 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 )
+
+// InterfacePrefix marks interfaces created by NostMesh.
+//
+// Ownership has to be decidable from the host alone, because after a crash the
+// journal may be incomplete and the adapter still must not delete something it
+// did not create. The name is the marker: netlink offers no place to attach
+// arbitrary metadata to a WireGuard link.
+//
+// This rule is platform-neutral by design: every adapter answers the ownership
+// question the same way, so a port to another operating system cannot quietly
+// adopt a laxer definition.
+const InterfacePrefix = "nm"
+
+// OwnsInterface reports whether an interface belongs to NostMesh.
+func OwnsInterface(name string) bool {
+	return strings.HasPrefix(name, InterfacePrefix)
+}
 
 var (
 	// ErrInterfaceNotFound reports a missing interface.

@@ -147,7 +147,7 @@ func (m *Manager) Apply(ctx context.Context, plan Plan) (result *Transaction, er
 			return
 		}
 		if rollbackErr := m.compensate(ctx, transaction); rollbackErr != nil {
-			err = fmt.Errorf("%w; rollback also failed: %v", err, rollbackErr)
+			err = fmt.Errorf("%w; rollback also failed: %w", err, rollbackErr)
 		}
 		transaction.Close(m.clock.Now())
 		_ = m.save(transaction)

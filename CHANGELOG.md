@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Transactional network state: plans are built before they are applied,
+  journaled at each step, and compensated in reverse on failure (M0.3).
+- Linux WireGuard adapter over netlink, with no shelling out to `wg` or `ip`.
+- Interface ownership enforcement: NostMesh refuses to configure or remove an
+  interface it did not create.
+- Fault injection, so rollback is exercised at every step of a plan.
+- Privileged integration tests running in isolated network namespaces.
+- `nostmesh status`, and `nostmesh up --dry-run`.
+- ADR NM-08 (transactional network changes).
+
 - Identity and session domain: node and peer identities, tunnel key bindings,
   and the session state machine (M0.2).
 - Private key types that cannot be printed, logged or serialized, with a single

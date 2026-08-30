@@ -6,10 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"os"
-	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -18,14 +18,6 @@ import (
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 )
-
-// interfacePrefix marks interfaces created by NostMesh.
-//
-// Ownership has to be decidable from the host alone, because after a crash the
-// journal may be incomplete and the adapter still must not delete something it
-// did not create. The name is the marker: netlink offers no place to attach
-// arbitrary metadata to a WireGuard link.
-const interfacePrefix = "nm"
 
 // defaultMTU leaves room for the WireGuard header inside a 1500-byte path.
 const defaultMTU = 1420
@@ -56,11 +48,6 @@ func (a *LinuxAdapter) Close() error {
 	return a.client.Close()
 }
 
-// OwnsInterface reports whether an interface belongs to NostMesh.
-func OwnsInterface(name string) bool {
-	return strings.HasPrefix(name, interfacePrefix)
-}
-
 // EnsureInterface brings the interface to the desired state.
 //
 // It is idempotent: an interface that already matches is left alone, and one
@@ -69,7 +56,7 @@ func OwnsInterface(name string) bool {
 func (a *LinuxAdapter) EnsureInterface(ctx context.Context, spec InterfaceSpec) (InterfaceState, error) {
 	if !OwnsInterface(spec.Name) {
 		return InterfaceState{}, fmt.Errorf("%w: interface %q does not carry the %q prefix",
-			ErrNotOwned, spec.Name, interfacePrefix)
+			ErrNotOwned, spec.Name, InterfacePrefix)
 	}
 	if err := ctx.Err(); err != nil {
 		return InterfaceState{}, err
@@ -326,7 +313,11 @@ func observedPeer(peer wgtypes.Peer) PeerState {
 	copy(state.PublicKey[:], peer.PublicKey[:])
 
 	if peer.Endpoint != nil {
-		if addr, ok := netip.AddrFromSlice(peer.Endpoint.IP); ok {
+		// The kernel reports the port as an int, but a UDP port cannot exceed
+		// 65535. A value outside that range means the endpoint is not
+		// meaningful, so it is dropped rather than silently truncated.
+		if addr, ok := netip.AddrFromSlice(peer.Endpoint.IP); ok &&
+			peer.Endpoint.Port > 0 && peer.Endpoint.Port <= math.MaxUint16 {
 			endpoint := netip.AddrPortFrom(addr.Unmap(), uint16(peer.Endpoint.Port))
 			state.Endpoint = &endpoint
 		}

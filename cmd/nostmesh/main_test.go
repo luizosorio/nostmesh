@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/luizosorio/nostmesh/internal/netstate"
 )
 
 func execute(t *testing.T, args ...string) (stdout, stderr string, code int) {
@@ -262,6 +265,138 @@ func TestIdentityArguments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, _, code := execute(t, tt.args...); code != exitUsage {
+				t.Errorf("exit code = %d, want %d", code, exitUsage)
+			}
+		})
+	}
+}
+
+func writeValidConfig(t *testing.T, stateDir string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "nostmesh.json")
+	content := `{
+      "node": {"name": "lab", "state_dir": "` + stateDir + `"},
+      "peers": [{
+        "name": "lab-a",
+        "public_key": "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=",
+        "endpoint": "198.51.100.10:51820",
+        "overlay_address": "100.96.0.2/32",
+        "allowed_ips": ["100.96.0.2/32"]
+      }]
+    }`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing configuration: %v", err)
+	}
+	return path
+}
+
+func TestStatusReportsConfiguration(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := writeValidConfig(t, stateDir)
+
+	stdout, stderr, code := execute(t, "status", "--config", configPath)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+
+	for _, want := range []string{"lab", "lab-a", "198.51.100.10:51820", "no interrupted transactions"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("status must mention %q, got: %q", want, stdout)
+		}
+	}
+}
+
+// An interrupted transaction is exactly what an operator needs surfaced: it
+// means the host may be carrying state nothing is tracking.
+func TestStatusSurfacesInterruptedTransaction(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := writeValidConfig(t, stateDir)
+
+	journal := netstate.NewJournalStore(filepath.Join(stateDir, "journal"))
+	transaction := netstate.NewTransaction("tx-abandoned", "nm0", time.Now())
+	if err := transaction.Plan(netstate.Operation{
+		ID:     "op-1",
+		Kind:   netstate.OpCreateInterface,
+		Target: "nm0",
+		Detail: "wireguard interface nm0",
+	}, time.Now()); err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if err := transaction.MarkApplying("op-1"); err != nil {
+		t.Fatalf("marking applying: %v", err)
+	}
+	if err := journal.Save(transaction); err != nil {
+		t.Fatalf("saving journal: %v", err)
+	}
+
+	stdout, stderr, code := execute(t, "status", "--config", configPath)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+
+	for _, want := range []string{"interrupted", "tx-abandoned", "partial state"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("status must mention %q, got: %q", want, stdout)
+		}
+	}
+}
+
+// Dry run must describe changes without touching anything.
+func TestUpDryRunDescribesWithoutApplying(t *testing.T) {
+	stateDir := t.TempDir()
+	configPath := writeValidConfig(t, stateDir)
+
+	stdout, stderr, code := execute(t, "up", "--config", configPath, "--dry-run")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+
+	for _, want := range []string{"dry run", "no changes", "lab-a"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("dry run must mention %q, got: %q", want, stdout)
+		}
+	}
+
+	// Nothing may be written to the state directory by a dry run.
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("reading state directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("dry run wrote to the state directory: %v", entries)
+	}
+}
+
+// A command that half works is worse than one that says it is not ready.
+func TestUpWithoutDryRunReportsNotImplemented(t *testing.T) {
+	configPath := writeValidConfig(t, t.TempDir())
+
+	_, stderr, code := execute(t, "up", "--config", configPath)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	if !strings.Contains(stderr, "M0.4") {
+		t.Errorf("error must say when this arrives, got: %q", stderr)
+	}
+}
+
+func TestDownWithNothingToReconcile(t *testing.T) {
+	configPath := writeValidConfig(t, t.TempDir())
+
+	stdout, _, code := execute(t, "down", "--config", configPath)
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d", code, exitOK)
+	}
+	if !strings.Contains(stdout, "nothing to reconcile") {
+		t.Errorf("expected a no-op message, got: %q", stdout)
+	}
+}
+
+func TestTunnelCommandsRequireConfig(t *testing.T) {
+	for _, command := range []string{"status", "up", "down"} {
+		t.Run(command, func(t *testing.T) {
+			if _, _, code := execute(t, command); code != exitUsage {
 				t.Errorf("exit code = %d, want %d", code, exitUsage)
 			}
 		})
