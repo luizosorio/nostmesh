@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-const goldenConfig = `{
+var goldenConfig = `{
   "node": {"name": "lab", "state_dir": "/var/lib/nostmesh"},
   "peers": [{
     "name": "lab-a",
-    "public_key": "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=",
+    "public_key": "` + testPeerKey(90) + `",
     "endpoint": "198.51.100.10:51820",
     "overlay_address": "100.96.0.2/32",
     "allowed_ips": ["100.96.0.2/32"]

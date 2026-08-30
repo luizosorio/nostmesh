@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -9,10 +10,21 @@ import (
 
 // validPeer returns a peer that passes validation, so each test can alter a
 // single field and attribute the failure to that field alone.
+// testPeerKey builds a WireGuard public key from a seed. Public keys are not
+// secret, but a base64 literal is indistinguishable from a credential to a
+// secret scanner; deriving it keeps the intent obvious.
+func testPeerKey(seed byte) string {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = seed + byte(i)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func validPeer() Peer {
 	return Peer{
 		Name:           "lab-a",
-		PublicKey:      "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=",
+		PublicKey:      testPeerKey(90),
 		Endpoint:       "198.51.100.10:51820",
 		OverlayAddress: "100.96.0.2/32",
 		AllowedIPs:     []string{"100.96.0.2/32"},
@@ -190,7 +202,7 @@ func TestValidateRejectsDuplicatePeers(t *testing.T) {
 	t.Run("duplicate name", func(t *testing.T) {
 		cfg := validConfig()
 		second := validPeer()
-		second.PublicKey = "GkiQFKn8kJVCEG9EJHQdCVJEQQ2c3wVBpU3zZbCfvVI="
+		second.PublicKey = testPeerKey(40)
 		cfg.Peers = append(cfg.Peers, second)
 
 		err := cfg.Validate()

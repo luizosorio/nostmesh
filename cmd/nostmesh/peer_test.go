@@ -1,14 +1,28 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/luizosorio/nostmesh/internal/domain"
 )
 
-const secondPeerKey = "GkiQFKn8kJVCEG9EJHQdCVJEQQ2c3wVBpU3zZbCfvVI="
+// testPeerKey builds a WireGuard public key from a seed.
+//
+// Public keys are not secret, but a base64 literal of one is indistinguishable
+// from a credential to a secret scanner. Deriving it makes the nature of the
+// value obvious to a reader and to the scanner alike.
+func testPeerKey(seed byte) string {
+	raw := make([]byte, domain.WireGuardKeySize)
+	for i := range raw {
+		raw[i] = seed + byte(i)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
 
 func writeEmptyConfig(t *testing.T) string {
 	t.Helper()
@@ -36,7 +50,7 @@ func addPeer(t *testing.T, configPath, name, key string, allowed string) (string
 func TestPeerAddThenList(t *testing.T) {
 	configPath := writeEmptyConfig(t)
 
-	stdout, stderr, code := addPeer(t, configPath, "lab-b", secondPeerKey, "100.96.0.2/32")
+	stdout, stderr, code := addPeer(t, configPath, "lab-b", testPeerKey(40), "100.96.0.2/32")
 	if code != exitOK {
 		t.Fatalf("adding peer: exit %d (stderr: %s)", code, stderr)
 	}
@@ -48,7 +62,7 @@ func TestPeerAddThenList(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("listing peers: exit %d (stderr: %s)", code, stderr)
 	}
-	for _, want := range []string{"lab-b", secondPeerKey, "198.51.100.10:51820"} {
+	for _, want := range []string{"lab-b", testPeerKey(40), "198.51.100.10:51820"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("list must mention %q, got: %q", want, stdout)
 		}
@@ -58,7 +72,7 @@ func TestPeerAddThenList(t *testing.T) {
 func TestPeerListJSON(t *testing.T) {
 	configPath := writeEmptyConfig(t)
 
-	if _, stderr, code := addPeer(t, configPath, "lab-b", secondPeerKey, "100.96.0.2/32"); code != exitOK {
+	if _, stderr, code := addPeer(t, configPath, "lab-b", testPeerKey(40), "100.96.0.2/32"); code != exitOK {
 		t.Fatalf("adding peer: %s", stderr)
 	}
 
@@ -81,7 +95,7 @@ func TestPeerListJSON(t *testing.T) {
 func TestPeerRemove(t *testing.T) {
 	configPath := writeEmptyConfig(t)
 
-	if _, stderr, code := addPeer(t, configPath, "lab-b", secondPeerKey, "100.96.0.2/32"); code != exitOK {
+	if _, stderr, code := addPeer(t, configPath, "lab-b", testPeerKey(40), "100.96.0.2/32"); code != exitOK {
 		t.Fatalf("adding peer: %s", stderr)
 	}
 
@@ -114,11 +128,11 @@ func TestPeerRemoveUnknown(t *testing.T) {
 func TestPeerAddRejectsDuplicateName(t *testing.T) {
 	configPath := writeEmptyConfig(t)
 
-	if _, stderr, code := addPeer(t, configPath, "lab-b", secondPeerKey, "100.96.0.2/32"); code != exitOK {
+	if _, stderr, code := addPeer(t, configPath, "lab-b", testPeerKey(40), "100.96.0.2/32"); code != exitOK {
 		t.Fatalf("adding peer: %s", stderr)
 	}
 
-	_, stderr, code := addPeer(t, configPath, "lab-b", "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=", "100.96.0.3/32")
+	_, stderr, code := addPeer(t, configPath, "lab-b", testPeerKey(90), "100.96.0.3/32")
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
@@ -133,7 +147,7 @@ func TestPeerAddRejectsDefaultRoute(t *testing.T) {
 	for _, prefix := range []string{"0.0.0.0/0", "::/0"} {
 		t.Run(prefix, func(t *testing.T) {
 			path := writeEmptyConfig(t)
-			_, stderr, code := addPeer(t, path, "gateway", secondPeerKey, prefix)
+			_, stderr, code := addPeer(t, path, "gateway", testPeerKey(40), prefix)
 
 			if code != exitError {
 				t.Fatalf("a default route must be refused, exit %d", code)
@@ -150,11 +164,11 @@ func TestPeerAddRejectsDefaultRoute(t *testing.T) {
 func TestPeerAddRejectsDuplicateKey(t *testing.T) {
 	configPath := writeEmptyConfig(t)
 
-	if _, stderr, code := addPeer(t, configPath, "first", secondPeerKey, "100.96.0.2/32"); code != exitOK {
+	if _, stderr, code := addPeer(t, configPath, "first", testPeerKey(40), "100.96.0.2/32"); code != exitOK {
 		t.Fatalf("adding peer: %s", stderr)
 	}
 
-	_, stderr, code := addPeer(t, configPath, "second", secondPeerKey, "100.96.0.3/32")
+	_, stderr, code := addPeer(t, configPath, "second", testPeerKey(40), "100.96.0.3/32")
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
@@ -172,7 +186,7 @@ func TestRefusedAddDoesNotModifyConfig(t *testing.T) {
 		t.Fatalf("reading configuration: %v", err)
 	}
 
-	if _, _, code := addPeer(t, configPath, "gateway", secondPeerKey, "0.0.0.0/0"); code != exitError {
+	if _, _, code := addPeer(t, configPath, "gateway", testPeerKey(40), "0.0.0.0/0"); code != exitError {
 		t.Fatal("a default route must be refused")
 	}
 

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -37,6 +38,16 @@ func deterministicKey() (domain.WireGuardPublicKey, domain.WireGuardPrivateKey, 
 	return public, private, nil
 }
 
+// testPeerKey builds a WireGuard public key from a seed; see the note in the
+// config package tests on why these are derived rather than written literally.
+func testPeerKey(seed byte) string {
+	raw := make([]byte, domain.WireGuardKeySize)
+	for i := range raw {
+		raw[i] = seed + byte(i)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 func testConfig() config.Config {
 	cfg := config.Default()
 	cfg.Node = config.Node{
@@ -48,7 +59,7 @@ func testConfig() config.Config {
 	}
 	cfg.Peers = []config.Peer{{
 		Name:           "lab-b",
-		PublicKey:      "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=",
+		PublicKey:      testPeerKey(90),
 		Endpoint:       "198.51.100.10:51820",
 		OverlayAddress: "100.96.0.2/32",
 		AllowedIPs:     []string{"100.96.0.2/32"},
