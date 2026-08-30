@@ -102,15 +102,33 @@ jobs:
           go-licenses check ./... \
             --disallowed_types=forbidden,restricted,reciprocal
 
-      - name: Verify no unexpected dependencies
+      # THIRD-PARTY.md is the human-readable record of what we depend on and
+      # under what terms. It has to name every direct dependency, or it is
+      # documentation that quietly goes stale.
+      - name: Verify THIRD-PARTY.md lists every dependency
         run: |
-          if [ -f go.sum ] && [ -s go.sum ]; then
-            echo "Dependencies present; THIRD-PARTY.md must list them."
-            grep -q "no third-party dependencies" THIRD-PARTY.md && {
-              echo "THIRD-PARTY.md still claims there are none. Regenerate it."
-              exit 1
-            }
+          missing=0
+          # Modules that actually reach the binary, not everything in the module
+          # graph: go.sum records transitive candidates that nothing imports.
+          go list -deps ./... \
+            | grep -E '^[a-z0-9-]+\.[a-z]+/' \
+            | grep -v '^github.com/luizosorio/nostmesh' \
+            | cut -d/ -f1-3 \
+            | sort -u > /tmp/modules.txt
+          while read -r module; do
+            [ -n "$module" ] || continue
+            if ! grep -qF "$module" THIRD-PARTY.md; then
+              echo "::error::$module is a dependency but is not listed in THIRD-PARTY.md"
+              missing=1
+            fi
+          done < /tmp/modules.txt
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Update THIRD-PARTY.md so it records every dependency and its license."
+            exit 1
           fi
+          echo "THIRD-PARTY.md lists every dependency."
+
 
   secrets:
     name: Secret scan

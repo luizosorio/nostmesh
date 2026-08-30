@@ -10,8 +10,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,4 +177,80 @@ func relative(t *testing.T, path string) string {
 		return path
 	}
 	return rel
+}
+
+// sanctionedSecretEscapes lists the functions that hand raw key material to a
+// caller, and the files permitted to call each one.
+//
+// These are the only places where a secret leaves the protection of its type.
+// Keeping the list here means adding a new escape requires editing this test,
+// which is the review prompt the invariant needs.
+var sanctionedSecretEscapes = map[string][]string{
+	"HexForKeystore":    {"internal/identity/devkeystore.go"},
+	"Base64ForKeystore": {"internal/identity/devkeystore.go"},
+}
+
+// TestSecretEscapesAreSanctioned enforces NM-06: the encoding methods that
+// serialize a private key exist for the development keystore alone. A new
+// caller elsewhere is how a secret ends up in a log, an event or a diagnostic
+// bundle, so it must be a deliberate, reviewed change rather than an import.
+func TestSecretEscapesAreSanctioned(t *testing.T) {
+	root := repoRoot(t)
+
+	for method, allowed := range sanctionedSecretEscapes {
+		t.Run(method, func(t *testing.T) {
+			for _, file := range callersOf(t, root, method) {
+				if slices.Contains(allowed, file) {
+					continue
+				}
+				t.Errorf("%s calls %s; this method hands over raw key material and is reserved for %s (see NM-06)",
+					file, method, strings.Join(allowed, ", "))
+			}
+		})
+	}
+}
+
+// callersOf returns the repository files that reference the given identifier,
+// excluding the file that declares it and test files.
+func callersOf(t *testing.T, root, identifier string) []string {
+	t.Helper()
+
+	var callers []string
+
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			// Reference documentation is not part of the module.
+			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		rel := relative(t, path)
+
+		// The declaring file necessarily mentions the name.
+		if strings.Contains(string(content), "func (k ") && strings.Contains(string(content), ") "+identifier+"(") {
+			return nil
+		}
+		if strings.Contains(string(content), "."+identifier+"(") {
+			callers = append(callers, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning repository: %v", err)
+	}
+
+	return callers
 }

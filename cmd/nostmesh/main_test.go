@@ -155,3 +155,115 @@ func TestConfigValidateArguments(t *testing.T) {
 		})
 	}
 }
+
+func TestIdentityInitAndShow(t *testing.T) {
+	stateDir := t.TempDir()
+
+	stdout, stderr, code := execute(t, "identity", "init", "--state-dir", stateDir)
+	if code != exitOK {
+		t.Fatalf("init exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "identity created") {
+		t.Errorf("expected a confirmation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "development only") {
+		t.Error("init must warn that the file keystore is not for production")
+	}
+
+	stdout, stderr, code = execute(t, "identity", "show", "--state-dir", stateDir)
+	if code != exitOK {
+		t.Fatalf("show exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "public key:") {
+		t.Errorf("expected the public key, got: %q", stdout)
+	}
+}
+
+// The private key must have no path to stdout. This reads the stored key and
+// asserts it does not appear anywhere the CLI prints.
+func TestIdentityShowNeverPrintsPrivateKey(t *testing.T) {
+	stateDir := t.TempDir()
+
+	if _, stderr, code := execute(t, "identity", "init", "--state-dir", stateDir); code != exitOK {
+		t.Fatalf("init failed: %s", stderr)
+	}
+
+	content, err := os.ReadFile(filepath.Join(stateDir, "identity.json"))
+	if err != nil {
+		t.Fatalf("reading key file: %v", err)
+	}
+
+	var stored struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if err := json.Unmarshal(content, &stored); err != nil {
+		t.Fatalf("parsing key file: %v", err)
+	}
+	if stored.PrivateKey == "" {
+		t.Fatal("test requires a stored private key")
+	}
+
+	for _, args := range [][]string{
+		{"identity", "show", "--state-dir", stateDir},
+		{"identity", "show", "--state-dir", stateDir, "--json"},
+		{"identity", "init", "--state-dir", stateDir},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stdout, stderr, _ := execute(t, args...)
+
+			if strings.Contains(stdout, stored.PrivateKey) {
+				t.Error("the private key reached stdout")
+			}
+			if strings.Contains(stderr, stored.PrivateKey) {
+				t.Error("the private key reached stderr")
+			}
+		})
+	}
+}
+
+func TestIdentityShowWithoutIdentity(t *testing.T) {
+	_, stderr, code := execute(t, "identity", "show", "--state-dir", t.TempDir())
+
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	if !strings.Contains(stderr, "identity init") {
+		t.Errorf("error must point at the command that fixes it, got: %q", stderr)
+	}
+}
+
+func TestIdentityInitRefusesOverwrite(t *testing.T) {
+	stateDir := t.TempDir()
+
+	if _, stderr, code := execute(t, "identity", "init", "--state-dir", stateDir); code != exitOK {
+		t.Fatalf("first init failed: %s", stderr)
+	}
+
+	_, stderr, code := execute(t, "identity", "init", "--state-dir", stateDir)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("error must explain the refusal, got: %q", stderr)
+	}
+}
+
+func TestIdentityArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"init without state dir", []string{"identity", "init"}},
+		{"show without state dir", []string{"identity", "show"}},
+		{"unknown subcommand", []string{"identity", "nonexistent"}},
+		{"no subcommand", []string{"identity"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, code := execute(t, tt.args...); code != exitUsage {
+				t.Errorf("exit code = %d, want %d", code, exitUsage)
+			}
+		})
+	}
+}
