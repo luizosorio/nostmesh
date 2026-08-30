@@ -55,6 +55,40 @@ benchstat before.txt after.txt
 A single run is noisy. `-count=5` or more is worth the wait when the result
 matters.
 
+## Baseline, 2026-08-30
+
+Recorded on the lab host: Intel Pentium Silver N6005 @ 2.00GHz, 4 cores, Debian
+13, kernel 6.12, Go 1.25.14, `-benchtime 20x`.
+
+| Benchmark | Result | Allocations |
+|---|---|---|
+| `InterfaceSetup` | 1.70 ms/op | 766 KB, 523 allocs |
+| `IdempotentApply` | 10.68 ms/op | 501 KB, 392 allocs |
+| `TunnelThroughput` | 385 MB/s | 4 B, 0 allocs |
+| `HandshakeLatency` | 5.92 ms/op | 2.1 MB, 1888 allocs |
+
+### What stands out
+
+**`IdempotentApply` is six times slower than creating an interface**, which is
+backwards: re-applying unchanged state should be cheaper than building it.
+
+`EnsureInterface` already skips the MTU when it matches, but `configureDevice`
+and `LinkSetUp` write unconditionally. Rewriting the private key is the
+expensive part — the kernel re-derives the public key each time — and it happens
+on every apply even when nothing changed.
+
+This matters because convergence is the common case: reconciliation and every
+retry re-apply a plan that is mostly already in place. It is a correctness-safe
+inefficiency — the result is right, it just costs more than it should — and it
+is recorded here rather than fixed in MVP 0, where nothing re-applies in a loop.
+The fix is to observe first and write only what differs, which is worth doing
+before MVP 2 introduces many peers reconciling together.
+
+**Throughput allocates nothing per operation**, which is what a kernel data
+plane should look like: the bytes never enter the Go process. The 385 MB/s
+figure is CPU-bound encryption on a low-power part with both tunnel ends sharing
+it, not a network measurement.
+
 ## Interpreting a change
 
 An interface setup that gets slower usually means more netlink round trips. A

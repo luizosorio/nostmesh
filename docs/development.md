@@ -23,7 +23,9 @@ Every target works with a `docker-` prefix. Without it, targets use a local Go
 | `check` | Format check, vet, tests, portability guard — what CI runs |
 | `build` | Static CGO-free binary into `bin/` |
 | `test` | Tests with the race detector |
-| `cover` | Tests with a coverage summary |
+| `cover` | Tests with a coverage summary (default suite only) |
+| `cover-all` | Coverage across both suites, including the netlink adapter |
+| `bench` | Baseline measurements — see [benchmarks.md](benchmarks.md) |
 | `lint` | golangci-lint (`make docker-lint` uses the pinned CI version) |
 | `portability` | Cross-compile for Linux, Windows and macOS |
 | `fmt` | Format the tree |
@@ -78,6 +80,16 @@ namespace, silently configuring the host instead.
 
 Domain, protocol, policy and config tests never need root. A test in those
 packages requiring privileges means a boundary has been crossed.
+
+### Measuring coverage honestly
+
+`make cover` reports the default suite only, which shows `internal/wireguard` at
+0% — the adapter has no unit tests by design, since testing a thin netlink layer
+without a kernel proves nothing. Its real coverage comes from the privileged
+suite.
+
+`make docker-cover-all` runs both with `-coverpkg` and reports the true figure.
+Use it before claiming a coverage number.
 
 ## Linux requirements at runtime
 
