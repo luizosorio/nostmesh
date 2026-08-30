@@ -20,8 +20,9 @@ work is never stacked on an unapproved base.
 
 ## Development environment
 
-Build and test run **in containers**. There is no requirement to install Go,
-`wg` or `nft` on your machine.
+Build and test run **in containers**, so contributing requires no local Go
+toolchain. This is how the project is developed, not how it ships: NostMesh is
+distributed as a single static binary that users install directly.
 
 ```bash
 make docker-check     # format, vet, tests, portability guard

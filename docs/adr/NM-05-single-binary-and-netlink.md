@@ -55,6 +55,9 @@ structured identification, which text generation does not provide.
   particularly in M0.3 and MVP 4. This cost is accepted deliberately.
 - The binary carries no runtime dependency beyond the kernel itself; `wg` and
   `nft` need not be installed on the host.
+- Installation is a file copy. Users place one executable on their `PATH`, with
+  no runtime, package tree or container to manage. Containers are a development
+  and testing convenience for this project, never a distribution format.
 - CGO-free constrains library choice, notably requiring a pure-Go SQLite driver.
 - Rule and route ownership must be identifiable structurally, so the adapter can
   guarantee it never removes state that does not belong to NostMesh.

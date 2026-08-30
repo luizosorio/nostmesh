@@ -67,29 +67,51 @@ responsibility from an operator who shares their connection.
 Out of scope for now: Windows, macOS, Android and iOS; onion routing; global
 consensus; post-payment or fund custody.
 
-## Getting started
+## Installing
 
-### Requirements
+NostMesh is a single static binary. Put it on your `PATH` and run it — there is
+nothing else to install, no runtime, no container.
 
-Everything builds and runs in containers. You need Docker and nothing else —
-no local Go toolchain.
+```bash
+sudo install -m 0755 nostmesh /usr/local/bin/
+nostmesh version
+```
+
+Requirements on the machine that runs it:
+
+- Linux with the `wireguard` kernel module (`sudo modprobe wireguard`)
+- `CAP_NET_ADMIN` for the commands that change network state
+
+`wg`, `wg-quick` and `nft` do **not** need to be installed. NostMesh configures
+the kernel directly over netlink rather than driving external tools.
+
+> Prebuilt binaries are not published yet — MVP 0 is still in progress. Until
+> then, build from source with the instructions below.
+
+## Building from source
 
 ```bash
 git clone git@github.com:luizosorio/nostmesh.git
 cd nostmesh
-
-make docker-check     # format, vet, tests, portability guard
-make docker-build     # produces bin/nostmesh
+make build            # produces bin/nostmesh
 ```
 
-To run the checks with a local Go 1.25 toolchain instead, drop the `docker-`
-prefix: `make check`, `make build`.
+That needs a local Go 1.25 toolchain. If you would rather not install one,
+every target also runs in a container with a `docker-` prefix:
+
+```bash
+make docker-build
+make docker-check     # format, vet, tests, portability guard
+```
+
+Containers are how this project develops and tests, not how it ships. See
+[docs/development.md](docs/development.md).
 
 ### Try it
 
 ```bash
-./bin/nostmesh version
-./bin/nostmesh config validate examples/nostmesh.json
+nostmesh version
+nostmesh config validate examples/nostmesh.json
 ```
 
 Configuration is declarative and validated before it can influence anything.
@@ -109,6 +131,9 @@ A **single, self-contained binary**. The CLI, the daemon and the auxiliary
 service roles are subcommands of the same executable. It links statically, needs
 no runtime dependencies, and never shells out to `wg`, `nft` or `ip` — network
 state is applied directly through the kernel over netlink.
+
+This is what makes installation a file copy: one binary, no runtime, no package
+tree, nothing to keep in version lockstep on the host.
 
 Dependencies point inward:
 

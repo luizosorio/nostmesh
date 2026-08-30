@@ -1,7 +1,10 @@
 # Development environment
 
-Build and test run in containers. Nothing needs to be installed on the host
-beyond a container runtime.
+Build and test run in containers, so nothing needs to be installed beyond a
+container runtime.
+
+This applies to development only. NostMesh ships as a single static binary that
+users install directly on their machine — see [Installing](../README.md#installing).
 
 ## Quick start
 
