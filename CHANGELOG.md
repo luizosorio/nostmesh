@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-relay transport: fan-out publication, per-relay acceptance reporting,
+  and a persistent outbox that survives a restart with pending work (M1.2).
+- Deduplication on two keys — event id for literal copies, and a logical key
+  (session, type, sequence) that also detects two different events claiming the
+  same position in a session.
+- Exponential backoff with symmetric jitter, so nodes that lost the same relay
+  do not all retry at the same instant.
+- Fake relays that go down, reject, delay, duplicate, reorder and silently drop,
+  making the adversarial acceptance criteria testable without public relays.
+- ADR NM-11 (file-backed local state), recording why MVP 0 and MVP 1 do not use
+  SQLite and when that should be revisited.
+
+### Added
+
 - Control protocol v1: envelope, eight message types, capability negotiation,
   and validation in documented cheapest-first order (M1.1).
 - NIP-44 v2 directed encryption, verified against the official test vectors,

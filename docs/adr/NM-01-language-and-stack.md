@@ -27,7 +27,7 @@ often conflated. They solve different problems.
 **`wgctrl-go`** is the default WireGuard control interface, with the data plane
 in the Linux kernel.
 
-**SQLite** is the local state store.
+**SQLite** is the local state store. *(Adjusted by [NM-11](NM-11-file-backed-local-state.md): MVP 0 and MVP 1 use file-backed state; SQLite remains the expected direction for the milestones with relational shapes.)*
 
 `wireguard-go` is reserved as an alternative adapter behind the same port, for
 future portability or for the MVP 3 relay, where userspace datagram handling may

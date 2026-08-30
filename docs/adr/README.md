@@ -37,3 +37,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-08](NM-08-transactional-network-changes.md) | Transactional network changes | Accepted |
 | [NM-09](NM-09-routes-follow-allowed-ips.md) | Routes follow AllowedIPs | Accepted |
 | [NM-10](NM-10-nostr-cryptography.md) | Nostr cryptography and library scope | Accepted |
+| [NM-11](NM-11-file-backed-local-state.md) | File-backed local state | Accepted |
