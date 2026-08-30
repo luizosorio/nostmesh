@@ -74,6 +74,28 @@ type Policy struct {
 
 	// MaxSessions caps concurrent sessions.
 	MaxSessions int `toml:"max_sessions" json:"max_sessions"`
+
+	// AuthorizedPeers is the allowlist. It is empty by default, which means
+	// nobody is authorized: a valid signature proves who is asking, not that
+	// they may.
+	AuthorizedPeers []AuthorizedPeer `toml:"authorized_peers" json:"authorized_peers,omitempty"`
+}
+
+// AuthorizedPeer grants a peer permission to act.
+type AuthorizedPeer struct {
+	// PublicKey is the peer's Nostr identity, hex-encoded.
+	PublicKey string `toml:"public_key" json:"public_key"`
+
+	// Alias is a local label with no authority.
+	Alias string `toml:"alias" json:"alias,omitempty"`
+
+	// Actions lists what the peer may do: session, route, transit. An action
+	// absent from the list is refused.
+	Actions []string `toml:"actions" json:"actions"`
+
+	// Revoked withdraws the grant while keeping the record, so an operator can
+	// see a peer was deliberately removed rather than never added.
+	Revoked bool `toml:"revoked" json:"revoked,omitempty"`
 }
 
 // Peer is a manually configured WireGuard peer.
