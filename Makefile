@@ -71,6 +71,19 @@ portability:
 			&& echo ok || exit 1; \
 	done
 
+# Privileged tests exercise the netlink adapter against a real kernel. They
+# need NET_ADMIN and the wireguard module loaded on the host, since containers
+# share the host kernel. Each test runs in its own network namespace.
+.PHONY: test-privileged
+test-privileged:
+	$(GO) test -tags privileged -count=1 ./test/integration/...
+
+.PHONY: docker-test-privileged
+docker-test-privileged:
+	docker run --rm --cap-add NET_ADMIN -v "$(PWD)":/src -w /src \
+		-e GOFLAGS=-buildvcs=false \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make test-privileged'
+
 .PHONY: check
 check: fmt-check vet test portability
 
