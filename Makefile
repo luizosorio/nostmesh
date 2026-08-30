@@ -99,6 +99,18 @@ cover-all:
 		grep -oE 'nostmesh/[a-z/]+\.go' | sort -u | \
 		sed 's|nostmesh/||' | cut -d/ -f1-2 | sort -u
 
+# Baseline measurements, not a performance claim. See docs/benchmarks.md for
+# what this setup does and does not measure.
+.PHONY: bench
+bench:
+	$(GO) test -tags privileged -run '^$$' -bench . -benchmem ./test/integration/...
+
+.PHONY: docker-bench
+docker-bench:
+	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \
+		-e GOFLAGS=-buildvcs=false \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make bench'
+
 .PHONY: docker-cover-all
 docker-cover-all:
 	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \
