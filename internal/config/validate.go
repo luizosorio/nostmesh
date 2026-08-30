@@ -93,10 +93,10 @@ func (n Node) validate() Errors {
 func (l Log) validate() Errors {
 	var errs Errors
 
-	if !contains(validLogLevels, l.Level) {
+	if !slices.Contains(validLogLevels, l.Level) {
 		errs = append(errs, Error{"log.level", fmt.Sprintf("must be one of %s, got %q", strings.Join(validLogLevels, ", "), l.Level)})
 	}
-	if !contains(validLogFormats, l.Format) {
+	if !slices.Contains(validLogFormats, l.Format) {
 		errs = append(errs, Error{"log.format", fmt.Sprintf("must be one of %s, got %q", strings.Join(validLogFormats, ", "), l.Format)})
 	}
 
@@ -238,8 +238,4 @@ func validatePeerAllowedIPs(allowed []string, field string) Errors {
 	}
 
 	return errs
-}
-
-func contains(values []string, want string) bool {
-	return slices.Contains(values, want)
 }

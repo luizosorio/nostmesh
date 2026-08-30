@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -34,7 +35,7 @@ func commands() []command {
 	}
 }
 
-func run(args []string, stdout, stderr writer) int {
+func run(args []string, stdout, stderr io.Writer) int {
 	out := &output{w: stdout}
 	errOut := &output{w: stderr}
 
@@ -71,14 +72,10 @@ func usage(out *output) {
 	out.printf("\nRun 'nostmesh <command> --help' for details about a command.\n")
 }
 
-// writer is the minimal sink the CLI writes to, so tests can capture output
-// without touching the filesystem.
-type writer interface {
-	Write(p []byte) (int, error)
-}
-
+// output wraps a writer so subcommands share one formatting helper and tests
+// can capture what the CLI prints.
 type output struct {
-	w writer
+	w io.Writer
 }
 
 func (o *output) printf(format string, args ...any) {
