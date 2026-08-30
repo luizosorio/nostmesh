@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -220,5 +221,161 @@ func TestPeerArguments(t *testing.T) {
 				t.Errorf("exit code = %d, want %d", code, exitUsage)
 			}
 		})
+	}
+}
+
+// nostrKeyOf builds a hex Nostr public key from a seed.
+func nostrKeyOf(seed byte) string {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = seed + byte(i)
+	}
+	return hex.EncodeToString(raw)
+}
+
+func writeConfigWithPeer(t *testing.T, authorized string) string {
+	t.Helper()
+
+	stateDir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "nostmesh.json")
+
+	grants := ""
+	if authorized != "" {
+		grants = `, "authorized_peers": [{"public_key": "` + authorized +
+			`", "alias": "lab-b", "actions": ["session"]}]`
+	}
+
+	content := `{
+      "node": {"name": "lab", "state_dir": "` + stateDir + `"},
+      "policy": {"default_action": "deny", "max_sessions": 64` + grants + `}
+    }`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing configuration: %v", err)
+	}
+	return path
+}
+
+func TestSessionsListsAuthorizedPeers(t *testing.T) {
+	peer := nostrKeyOf(3)
+	configPath := writeConfigWithPeer(t, peer)
+
+	stdout, stderr, code := execute(t, "sessions", "--config", configPath)
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+
+	for _, want := range []string{"lab-b", peer, "session"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("output must mention %q, got: %q", want, stdout)
+		}
+	}
+}
+
+// An empty allowlist authorizes nobody, and the output should say so plainly
+// rather than looking like an error.
+func TestSessionsWithNoAuthorizedPeers(t *testing.T) {
+	configPath := writeConfigWithPeer(t, "")
+
+	stdout, _, code := execute(t, "sessions", "--config", configPath)
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d", code, exitOK)
+	}
+	if !strings.Contains(stdout, "no authorized peers") {
+		t.Errorf("expected an explanation, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "denies by default") {
+		t.Errorf("output should explain the default, got: %q", stdout)
+	}
+}
+
+// Policy is consulted before anything is attempted, and the refusal names what
+// to do about it.
+func TestConnectRefusesUnauthorizedPeer(t *testing.T) {
+	configPath := writeConfigWithPeer(t, nostrKeyOf(3))
+
+	_, stderr, code := execute(t, "connect", "--config", configPath, "--peer", nostrKeyOf(200))
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	if !strings.Contains(stderr, "not authorized") {
+		t.Errorf("error must say the peer is unauthorized, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "authorized_peers") {
+		t.Errorf("error must say how to authorize, got: %q", stderr)
+	}
+}
+
+// A refusal must not disclose who else is authorized.
+func TestConnectRefusalRevealsNoOtherPeers(t *testing.T) {
+	authorized := nostrKeyOf(3)
+	configPath := writeConfigWithPeer(t, authorized)
+
+	_, stderr, _ := execute(t, "connect", "--config", configPath, "--peer", nostrKeyOf(200))
+
+	if strings.Contains(stderr, authorized) {
+		t.Errorf("the refusal leaks an authorized key: %q", stderr)
+	}
+	if strings.Contains(stderr, "lab-b") {
+		t.Errorf("the refusal leaks another peer's alias: %q", stderr)
+	}
+}
+
+func TestSessionCommandsRejectMalformedKeys(t *testing.T) {
+	configPath := writeConfigWithPeer(t, nostrKeyOf(3))
+
+	for _, command := range []string{"connect", "disconnect"} {
+		t.Run(command, func(t *testing.T) {
+			_, stderr, code := execute(t, command, "--config", configPath, "--peer", "not-a-key")
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d", code, exitError)
+			}
+			if stderr == "" {
+				t.Error("a malformed key must produce an explanation")
+			}
+		})
+	}
+}
+
+func TestSessionCommandsRequireArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"connect without config", []string{"connect", "--peer", nostrKeyOf(3)}},
+		{"connect without peer", []string{"connect", "--config", "x.json"}},
+		{"sessions without config", []string{"sessions"}},
+		{"disconnect without peer", []string{"disconnect", "--config", "x.json"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, code := execute(t, tt.args...); code != exitUsage {
+				t.Errorf("exit code = %d, want %d", code, exitUsage)
+			}
+		})
+	}
+}
+
+// An unknown action in the configuration is refused rather than dropped:
+// silently narrowing a grant is a security decision the operator did not make.
+func TestUnknownActionIsRefused(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "nostmesh.json")
+
+	content := `{
+      "node": {"name": "lab", "state_dir": "` + stateDir + `"},
+      "policy": {"default_action": "deny", "max_sessions": 64,
+        "authorized_peers": [{"public_key": "` + nostrKeyOf(3) + `", "actions": ["session", "become-root"]}]}
+    }`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing configuration: %v", err)
+	}
+
+	_, stderr, code := execute(t, "config", "validate", path)
+	if code != exitError {
+		t.Fatalf("an unknown action must be refused, exit %d", code)
+	}
+	if !strings.Contains(stderr, "become-root") {
+		t.Errorf("the error must name the unknown action, got: %q", stderr)
 	}
 }

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Session handshake: request → offer → accept, with the ephemeral WireGuard
+  public key bound to sender, recipient, session and expiry (M1.3).
+- Deny-by-default allowlist. Actions are separate, so a peer trusted to open a
+  session is not thereby trusted to announce routes.
+- Real secp256k1 Schnorr signing and key derivation, replacing the development
+  placeholder (NM-12 supersedes NM-07).
+- `nostmesh connect`, `sessions` and `disconnect`.
+
+### Changed
+
+- **Identities created before this release are rejected on load.** The
+  placeholder derived a digest rather than a curve point, so such an identity
+  cannot sign. Regenerate with `nostmesh identity init`.
+
+### Security
+
+- A peer's `session.ready` no longer implies anything about the local tunnel:
+  only local verification establishes a session.
+- Tunnel key substitution, replay at a used sequence, acceptance of terms that
+  were never offered, and expired keys all fail without changing state.
+
+### Added
+
 - Multi-relay transport: fan-out publication, per-relay acceptance reporting,
   and a persistent outbox that survives a restart with pending work (M1.2).
 - Deduplication on two keys — event id for literal copies, and a logical key

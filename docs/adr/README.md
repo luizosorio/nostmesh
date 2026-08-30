@@ -33,8 +33,9 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-04](NM-04-control-data-plane-separation.md) | Control and data plane separation | Accepted |
 | [NM-05](NM-05-single-binary-and-netlink.md) | Single binary and direct kernel interface | Accepted |
 | [NM-06](NM-06-key-separation-and-secret-handling.md) | Key separation and secret handling | Accepted |
-| [NM-07](NM-07-deferred-nostr-key-derivation.md) | Deferred Nostr key derivation | Accepted, must be superseded in M1.1 |
+| [NM-07](NM-07-deferred-nostr-key-derivation.md) | Deferred Nostr key derivation | Superseded by NM-12 |
 | [NM-08](NM-08-transactional-network-changes.md) | Transactional network changes | Accepted |
 | [NM-09](NM-09-routes-follow-allowed-ips.md) | Routes follow AllowedIPs | Accepted |
 | [NM-10](NM-10-nostr-cryptography.md) | Nostr cryptography and library scope | Accepted |
 | [NM-11](NM-11-file-backed-local-state.md) | File-backed local state | Accepted |
+| [NM-12](NM-12-real-key-derivation.md) | Real key derivation replaces the placeholder | Accepted |

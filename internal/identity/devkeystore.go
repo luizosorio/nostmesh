@@ -126,7 +126,21 @@ func (k *DevelopmentKeystore) Load() (domain.NodeIdentity, error) {
 		return domain.NodeIdentity{}, fmt.Errorf("keystore at %s has unsupported version %d", k.path, stored.Version)
 	}
 
-	return k.decode(stored)
+	identity, err := k.decode(stored)
+	if err != nil {
+		return domain.NodeIdentity{}, err
+	}
+
+	// An identity whose public key does not match its private key predates real
+	// derivation. It cannot sign, so loading it would produce a node that looks
+	// configured and can never communicate.
+	if DeriveNostrPublicKey != nil {
+		if err := VerifyStoredIdentity(identity); err != nil {
+			return domain.NodeIdentity{}, fmt.Errorf("keystore at %s: %w", k.path, err)
+		}
+	}
+
+	return identity, nil
 }
 
 func (k *DevelopmentKeystore) decode(stored storedIdentity) (domain.NodeIdentity, error) {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/netip"
@@ -128,6 +129,8 @@ func (p Policy) validate() Errors {
 		errs = append(errs, Error{"policy.default_action", fmt.Sprintf(`must be "deny"; allow-by-default is not supported, got %q`, p.DefaultAction)})
 	}
 
+	errs = append(errs, validateAuthorizedPeers(p.AuthorizedPeers)...)
+
 	switch {
 	case p.MaxSessions <= 0:
 		errs = append(errs, Error{"policy.max_sessions", fmt.Sprintf("must be greater than zero, got %d", p.MaxSessions)})
@@ -136,6 +139,75 @@ func (p Policy) validate() Errors {
 	}
 
 	return errs
+}
+
+// knownActions is the closed set of things a peer can be authorized to do.
+var knownActions = []string{"session", "route", "transit"}
+
+// validateAuthorizedPeers checks the allowlist.
+//
+// An unknown action is rejected rather than ignored: silently dropping one
+// would produce a grant narrower than the operator wrote, which is a security
+// decision they did not make.
+func validateAuthorizedPeers(peers []AuthorizedPeer) Errors {
+	var errs Errors
+
+	seen := make(map[string]int, len(peers))
+
+	for i, peer := range peers {
+		field := func(name string) string {
+			return fmt.Sprintf("policy.authorized_peers[%d].%s", i, name)
+		}
+
+		if err := validateNostrKey(peer.PublicKey, field("public_key")); err != nil {
+			errs = append(errs, *err)
+		} else if first, duplicate := seen[peer.PublicKey]; duplicate {
+			errs = append(errs, Error{field("public_key"),
+				fmt.Sprintf("duplicates policy.authorized_peers[%d]; one grant per peer", first)})
+		} else {
+			seen[peer.PublicKey] = i
+		}
+
+		if len(peer.Actions) == 0 {
+			errs = append(errs, Error{field("actions"),
+				"must list at least one action; an empty list authorizes nothing and is probably a mistake"})
+		}
+		for j, action := range peer.Actions {
+			if !slices.Contains(knownActions, action) {
+				errs = append(errs, Error{
+					fmt.Sprintf("%s[%d]", field("actions"), j),
+					fmt.Sprintf("must be one of %s, got %q", strings.Join(knownActions, ", "), action),
+				})
+			}
+		}
+	}
+
+	return errs
+}
+
+// validateNostrKey checks a hex-encoded Nostr public key.
+func validateNostrKey(value, field string) *Error {
+	if value == "" {
+		return &Error{field, "must not be empty; set the peer's Nostr public key"}
+	}
+
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return &Error{field, "must be a hex-encoded Nostr public key"}
+	}
+	if len(raw) != 32 {
+		return &Error{field, fmt.Sprintf("must decode to 32 bytes, got %d", len(raw))}
+	}
+
+	var acc byte
+	for _, b := range raw {
+		acc |= b
+	}
+	if acc == 0 {
+		return &Error{field, "must not be all zeros"}
+	}
+
+	return nil
 }
 
 func validatePeers(peers []Peer) Errors {

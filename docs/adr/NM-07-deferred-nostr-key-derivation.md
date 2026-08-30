@@ -1,9 +1,9 @@
 # NM-07 — Deferred Nostr key derivation
 
-**Status:** Accepted
+**Status:** Superseded by [NM-12](NM-12-real-key-derivation.md)
 **Date:** 2026-08-30
 **Milestone:** M0.2
-**Supersede by:** M1.1, mandatory
+**Superseded:** M1.3
 
 ## Context
 
