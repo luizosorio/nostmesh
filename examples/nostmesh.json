@@ -1,0 +1,28 @@
+{
+  "node": {
+    "name": "lab-node-a",
+    "state_dir": "/var/lib/nostmesh"
+  },
+
+  "log": {
+    "level": "info",
+    "format": "json"
+  },
+
+  "policy": {
+    "default_action": "deny",
+    "accept_default_route": false,
+    "max_sessions": 64
+  },
+
+  "peers": [
+    {
+      "name": "lab-node-b",
+      "public_key": "iOBxLBRuVMFEnLBVDkPMz1x0dQlpTAiJEHrTNCXqGmM=",
+      "endpoint": "198.51.100.10:51820",
+      "overlay_address": "100.96.0.2/32",
+      "allowed_ips": ["100.96.0.2/32"],
+      "keepalive": 25000000000
+    }
+  ]
+}

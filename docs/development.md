@@ -1,0 +1,84 @@
+# Development environment
+
+Build and test run in containers, so nothing needs to be installed beyond a
+container runtime.
+
+This applies to development only. NostMesh ships as a single static binary that
+users install directly on their machine — see [Installing](../README.md#installing).
+
+## Quick start
+
+```bash
+make docker-check     # format, vet, tests, portability guard
+make docker-build     # produces bin/nostmesh
+```
+
+Every target works with a `docker-` prefix. Without it, targets use a local Go
+1.25 toolchain.
+
+## Targets
+
+| Target | Does |
+|---|---|
+| `check` | Format check, vet, tests, portability guard — what CI runs |
+| `build` | Static CGO-free binary into `bin/` |
+| `test` | Tests with the race detector |
+| `cover` | Tests with a coverage summary |
+| `lint` | golangci-lint (`make docker-lint` uses the pinned CI version) |
+| `portability` | Cross-compile for Linux, Windows and macOS |
+| `fmt` | Format the tree |
+| `clean` | Remove build output |
+
+The linter version is pinned in the Makefile and in CI so both analyze with the
+same rules. Run `make docker-lint` before opening a PR — `make check` does not
+include it, since it needs a different image.
+
+## Privileged tests
+
+Tests touching WireGuard, nftables or network namespaces need `NET_ADMIN` and
+the `wireguard` kernel module. Containers share the host kernel, so load it on
+the host first:
+
+```bash
+sudo modprobe wireguard
+```
+
+Verify:
+
+```bash
+lsmod | grep wireguard
+```
+
+The module is not loaded at boot on every distribution. To make it persistent:
+
+```bash
+echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf
+```
+
+Then run the privileged suite with the capability granted:
+
+```bash
+docker run --rm --cap-add NET_ADMIN -v "$PWD":/src -w /src \
+  golang:1.25 go test -tags privileged ./test/integration/...
+```
+
+Domain, protocol, policy and config tests never need root. A test in those
+packages requiring privileges means a boundary has been crossed.
+
+## Layout
+
+The core — `internal/domain`, `internal/protocol`, `internal/policy`,
+`internal/config` — must not import an OS package, `syscall`, or any adapter.
+`test/architecture` enforces this and fails the build on violation.
+
+Platform code lives behind ports: `port.go` declares the interface,
+`adapter_linux.go` and friends implement it under build tags.
+
+## Before opening a PR
+
+```bash
+make docker-check
+```
+
+This runs the same checks CI does. See [CONTRIBUTING.md](../CONTRIBUTING.md) for
+the workflow and the Definition of Done.
