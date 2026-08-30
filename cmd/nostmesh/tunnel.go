@@ -1,200 +1,283 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
+	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/orchestrator"
+	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
 func journalDir(stateDir string) string {
 	return filepath.Join(stateDir, "journal")
 }
 
-// runStatus reports desired configuration against observed host state.
+// buildOrchestrator wires the real Linux adapter to the orchestrator.
 //
-// Showing both is the point: a session the configuration expects but the kernel
-// does not have is exactly the situation an operator needs to see.
-func runStatus(args []string, stdout, stderr *output) int {
-	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+// It returns a cleanup function, because the netlink control socket must be
+// released even when the command fails.
+func buildOrchestrator(cfg config.Config) (*orchestrator.Orchestrator, func(), error) {
+	adapter, err := wireguard.NewLinuxAdapter()
+	if err != nil {
+		return nil, func() {}, err
+	}
+	cleanup := func() { _ = adapter.Close() }
+
+	generator := identity.NewKeyGenerator()
+
+	instance, err := orchestrator.New(orchestrator.Options{
+		Controller:  adapter,
+		Journal:     netstate.NewJournalStore(journalDir(cfg.Node.StateDir)),
+		Clock:       domain.SystemClock{},
+		GenerateKey: generator.Generate,
+	})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return instance, cleanup, nil
+}
+
+// loadConfigFlag parses the shared --config flag.
+func loadConfigFlag(name string, args []string, stderr *output, extra func(*flag.FlagSet)) (config.Config, []string, int) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr.w)
 	configPath := flags.String("config", "", "path to the configuration file (required)")
-
-	flags.Usage = func() {
-		stderr.printf("Usage: nostmesh status --config <path>\n\n" +
-			"Report the configured peers and what the host currently carries.\n\nFlags:\n")
-		flags.PrintDefaults()
+	if extra != nil {
+		extra(flags)
 	}
 
 	if err := flags.Parse(args); err != nil {
-		return exitUsage
+		return config.Config{}, nil, exitUsage
 	}
 	if *configPath == "" {
-		stderr.printf("nostmesh status: --config is required\n")
-		return exitUsage
+		stderr.printf("nostmesh %s: --config is required\n", name)
+		return config.Config{}, nil, exitUsage
 	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		stderr.printf("%v\n", err)
-		return exitError
+		return config.Config{}, nil, exitError
 	}
-
-	stdout.printf("node:  %s\n", cfg.Node.Name)
-	stdout.printf("state: %s\n\n", cfg.Node.StateDir)
-
-	stdout.printf("configured peers: %d\n", len(cfg.Peers))
-	for _, peer := range cfg.Peers {
-		stdout.printf("  %s\n", peer.Name)
-		stdout.printf("    endpoint: %s\n", peer.Endpoint)
-		stdout.printf("    overlay:  %s\n", peer.OverlayAddress)
-		stdout.printf("    allowed:  %s\n", strings.Join(peer.AllowedIPs, ", "))
-	}
-
-	return reportJournal(cfg, stdout, stderr)
+	return cfg, flags.Args(), exitOK
 }
 
-// reportJournal surfaces interrupted transactions, which is what tells an
-// operator the host may be carrying partial state.
-func reportJournal(cfg config.Config, stdout, stderr *output) int {
-	journal := netstate.NewJournalStore(journalDir(cfg.Node.StateDir))
+func runStatus(args []string, stdout, stderr *output) int {
+	cfg, _, code := loadConfigFlag("status", args, stderr, nil)
+	if code != exitOK {
+		return code
+	}
 
-	pending, err := journal.PendingRecovery()
+	instance, cleanup, err := buildOrchestrator(cfg)
 	if err != nil {
-		stderr.printf("nostmesh status: reading journal: %v\n", err)
+		stderr.printf("nostmesh status: %v\n", err)
+		return exitError
+	}
+	defer cleanup()
+
+	status, err := instance.Status(context.Background(), cfg)
+	if err != nil {
+		stderr.printf("nostmesh status: %v\n", err)
 		return exitError
 	}
 
-	if len(pending) == 0 {
+	return renderStatus(status, cfg, stdout)
+}
+
+// renderStatus prints desired configuration beside observed host state.
+//
+// Showing both is the point: the gap between them is what tells an operator
+// whether the tunnel is merely configured or actually working.
+func renderStatus(status orchestrator.Status, cfg config.Config, stdout *output) int {
+	stdout.printf("node:      %s\n", cfg.Node.Name)
+	stdout.printf("interface: %s\n", status.Interface)
+
+	if status.ObserveFailed != nil {
+		stdout.printf("state:     unknown (%v)\n", status.ObserveFailed)
+	} else if status.InterfaceUp {
+		stdout.printf("state:     up\n")
+	} else {
+		stdout.printf("state:     down\n")
+	}
+
+	stdout.printf("\nconfigured peers: %d\n", len(status.Configured))
+	for _, peer := range status.Configured {
+		stdout.printf("  %s\n", peer.Name)
+		stdout.printf("    endpoint:    %s\n", peer.Endpoint)
+		stdout.printf("    allowed ips: %s\n", strings.Join(peer.AllowedIPs, ", "))
+		renderObservedPeer(status, peer, stdout)
+	}
+
+	if status.Observed != nil {
+		stdout.printf("\nobserved: MTU %d, listen port %d\n",
+			status.Observed.MTU, status.Observed.ListenPort)
+	}
+
+	return renderPending(status, stdout)
+}
+
+// renderObservedPeer reports what the kernel says about one configured peer.
+func renderObservedPeer(status orchestrator.Status, peer config.Peer, stdout *output) {
+	if status.Observed == nil {
+		stdout.printf("    observed:    not configured on the host\n")
+		return
+	}
+
+	key, err := domain.ParseWireGuardPublicKey(peer.PublicKey)
+	if err != nil {
+		stdout.printf("    observed:    unreadable public key\n")
+		return
+	}
+
+	for _, observed := range status.Observed.Peers {
+		if observed.PublicKey != key {
+			continue
+		}
+		if observed.HasHandshake() {
+			stdout.printf("    observed:    handshake %s ago, rx %d, tx %d\n",
+				time.Since(observed.LastHandshake).Round(time.Second),
+				observed.ReceiveBytes, observed.TransmitBytes)
+		} else {
+			stdout.printf("    observed:    present, no handshake yet\n")
+		}
+		return
+	}
+
+	stdout.printf("    observed:    not configured on the host\n")
+}
+
+func renderPending(status orchestrator.Status, stdout *output) int {
+	if len(status.Pending) == 0 {
 		stdout.printf("\njournal: no interrupted transactions\n")
 		return exitOK
 	}
 
-	stdout.printf("\njournal: %d interrupted transaction(s)\n", len(pending))
-	for _, transaction := range pending {
+	stdout.printf("\njournal: %d interrupted transaction(s)\n", len(status.Pending))
+	for _, transaction := range status.Pending {
 		stdout.printf("  %s on %s, started %s\n",
 			transaction.ID, transaction.Interface, transaction.StartedAt.Format(time.RFC3339))
-		for _, op := range transaction.Operations {
-			if op.Status == netstate.StatusApplying || op.Status == netstate.StatusApplied {
-				stdout.printf("    %s %s: %s\n", op.Status, op.Kind, op.Detail)
-			}
-		}
 	}
 	stdout.printf("\nthe host may carry partial state; run 'nostmesh down' to reconcile\n")
 
 	return exitOK
 }
 
-// runUp is the placeholder for bringing a tunnel up.
-//
-// The transactional machinery it needs exists, but wiring it to a live
-// interface requires the orchestrator that M0.4 introduces. Failing with a
-// clear message beats a command that half works.
 func runUp(args []string, stdout, stderr *output) int {
-	flags := flag.NewFlagSet("up", flag.ContinueOnError)
-	flags.SetOutput(stderr.w)
-	configPath := flags.String("config", "", "path to the configuration file (required)")
-	dryRun := flags.Bool("dry-run", false, "describe the changes without applying them")
-
-	flags.Usage = func() {
-		stderr.printf("Usage: nostmesh up --config <path> [--dry-run]\n\n" +
-			"Bring the configured tunnel up.\n\nFlags:\n")
-		flags.PrintDefaults()
+	var dryRun *bool
+	cfg, _, code := loadConfigFlag("up", args, stderr, func(flags *flag.FlagSet) {
+		dryRun = flags.Bool("dry-run", false, "describe the changes without applying them")
+	})
+	if code != exitOK {
+		return code
 	}
 
-	if err := flags.Parse(args); err != nil {
-		return exitUsage
-	}
-	if *configPath == "" {
-		stderr.printf("nostmesh up: --config is required\n")
-		return exitUsage
-	}
+	// A dry run describes changes without touching the host, so it must work
+	// without the netlink socket — an operator checking what would happen
+	// should not need privileges to do it.
+	controller := wireguard.Controller(nil)
+	var cleanup = func() {}
 
-	cfg, err := config.Load(*configPath)
+	if dryRun == nil || !*dryRun {
+		adapter, adapterErr := wireguard.NewLinuxAdapter()
+		if adapterErr != nil {
+			stderr.printf("nostmesh up: %v\n", adapterErr)
+			return exitError
+		}
+		controller = adapter
+		cleanup = func() { _ = adapter.Close() }
+	} else {
+		controller = wireguard.NewFakeController()
+	}
+	defer cleanup()
+
+	instance, err := orchestrator.New(orchestrator.Options{
+		Controller:  controller,
+		Journal:     netstate.NewJournalStore(journalDir(cfg.Node.StateDir)),
+		Clock:       domain.SystemClock{},
+		GenerateKey: identity.NewKeyGenerator().Generate,
+	})
 	if err != nil {
-		stderr.printf("%v\n", err)
+		stderr.printf("nostmesh up: %v\n", err)
 		return exitError
 	}
 
-	if *dryRun {
-		return describePlan(cfg, stdout)
+	ctx := context.Background()
+
+	plan, err := instance.PlanUp(ctx, cfg)
+	if err != nil {
+		if errors.Is(err, orchestrator.ErrNoPeers) {
+			stderr.printf("nostmesh up: no peers configured; add one with 'nostmesh peer add'\n")
+			return exitError
+		}
+		stderr.printf("nostmesh up: %v\n", err)
+		return exitError
 	}
 
-	stderr.printf("nostmesh up: not implemented yet; the orchestrator arrives in M0.4\n")
-	stderr.printf("use --dry-run to see the changes that would be applied\n")
-	return exitError
-}
-
-// describePlan renders what would change, without touching the host.
-func describePlan(cfg config.Config, stdout *output) int {
-	stdout.printf("dry run: no changes will be applied\n\n")
-	stdout.printf("interface nm0\n")
-	stdout.printf("  addresses: derived from peer overlay configuration\n")
-	stdout.printf("  MTU:       1420\n\n")
-
-	if len(cfg.Peers) == 0 {
-		stdout.printf("no peers configured\n")
+	if dryRun != nil && *dryRun {
+		stdout.printf("dry run: no changes will be applied\n\n")
+		for _, line := range plan.Describe() {
+			stdout.printf("  %s\n", line)
+		}
+		stdout.printf("\n%d operation(s) would be applied\n", len(plan.Operations))
 		return exitOK
 	}
 
-	stdout.printf("peers:\n")
-	for _, peer := range cfg.Peers {
-		stdout.printf("  %s\n", peer.Name)
-		stdout.printf("    endpoint:    %s\n", peer.Endpoint)
-		stdout.printf("    allowed ips: %s\n", strings.Join(peer.AllowedIPs, ", "))
+	transaction, err := instance.Up(ctx, cfg)
+	if err != nil {
+		stderr.printf("nostmesh up: %v\n", err)
+		stderr.printf("the host was left as it was found\n")
+		return exitError
 	}
 
-	stdout.printf("\n%d operation(s) would be applied\n", len(cfg.Peers)+4)
+	stdout.printf("tunnel up on %s\n", transaction.Interface)
+	stdout.printf("  %d operation(s) applied\n", len(transaction.AppliedOperations()))
+	stdout.printf("  %d peer(s) configured\n", len(cfg.Peers))
+
 	return exitOK
 }
 
-// runDown reconciles the host against the journal, removing what NostMesh
-// applied and leaving everything else alone.
 func runDown(args []string, stdout, stderr *output) int {
-	flags := flag.NewFlagSet("down", flag.ContinueOnError)
-	flags.SetOutput(stderr.w)
-	configPath := flags.String("config", "", "path to the configuration file (required)")
-
-	flags.Usage = func() {
-		stderr.printf("Usage: nostmesh down --config <path>\n\n" +
-			"Remove what NostMesh applied and reconcile the journal.\n\nFlags:\n")
-		flags.PrintDefaults()
+	cfg, _, code := loadConfigFlag("down", args, stderr, nil)
+	if code != exitOK {
+		return code
 	}
 
-	if err := flags.Parse(args); err != nil {
-		return exitUsage
-	}
-	if *configPath == "" {
-		stderr.printf("nostmesh down: --config is required\n")
-		return exitUsage
-	}
-
-	cfg, err := config.Load(*configPath)
+	instance, cleanup, err := buildOrchestrator(cfg)
 	if err != nil {
-		stderr.printf("%v\n", err)
+		stderr.printf("nostmesh down: %v\n", err)
+		return exitError
+	}
+	defer cleanup()
+
+	result, err := instance.Down(context.Background())
+	if err != nil {
+		stderr.printf("nostmesh down: %v\n", err)
 		return exitError
 	}
 
-	journal := netstate.NewJournalStore(journalDir(cfg.Node.StateDir))
-	pending, err := journal.PendingRecovery()
-	if err != nil {
-		stderr.printf("nostmesh down: reading journal: %v\n", err)
-		return exitError
-	}
-
-	if len(pending) == 0 {
-		stdout.printf("nothing to reconcile\n")
+	if len(result.Removed) == 0 && len(result.Interrupted) == 0 {
+		stdout.printf("nothing to remove\n")
 		return exitOK
 	}
 
-	stdout.printf("%d interrupted transaction(s) recorded:\n", len(pending))
-	for _, transaction := range pending {
-		stdout.printf("  %s on %s\n", transaction.ID, transaction.Interface)
+	for _, removed := range result.Removed {
+		stdout.printf("removed %s\n", removed)
+	}
+	for _, kept := range result.Kept {
+		stdout.printf("kept %s (not owned by nostmesh)\n", kept)
+	}
+	if len(result.Interrupted) > 0 {
+		stdout.printf("reconciled %d interrupted transaction(s)\n", len(result.Interrupted))
 	}
 
-	stderr.printf("\nnostmesh down: reconciliation is not implemented yet; the orchestrator arrives in M0.4\n")
-	return exitError
+	return exitOK
 }

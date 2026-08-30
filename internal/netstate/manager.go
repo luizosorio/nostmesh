@@ -10,6 +10,13 @@ import (
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
+// PeerLabel maps a peer's public key to the operator's own name for it, so a
+// plan reads in the operator's terms rather than in base64.
+type PeerLabel struct {
+	PublicKey string
+	Name      string
+}
+
 // Plan is the set of changes required to reach a desired state.
 //
 // It is produced before anything is applied, which is what makes dry-run
@@ -19,6 +26,9 @@ type Plan struct {
 	Interface     wireguard.InterfaceSpec
 	Peers         []wireguard.PeerSpec
 	Operations    []Operation
+
+	// Labels name peers as the operator configured them.
+	Labels []PeerLabel
 }
 
 // Describe renders the plan for a human, without key material.
@@ -76,7 +86,7 @@ func (m *Manager) InjectFailureAfter(kind OperationKind) {
 // It observes the host first, so the plan records what already existed.
 // Compensation reads that: an interface NostMesh found rather than created must
 // survive a rollback.
-func (m *Manager) PlanInterface(ctx context.Context, transactionID string, iface wireguard.InterfaceSpec, peers []wireguard.PeerSpec) (Plan, error) {
+func (m *Manager) PlanInterface(ctx context.Context, transactionID string, iface wireguard.InterfaceSpec, peers []wireguard.PeerSpec, labels ...PeerLabel) (Plan, error) {
 	if transactionID == "" {
 		return Plan{}, errors.New("plan requires a transaction id")
 	}
@@ -89,7 +99,7 @@ func (m *Manager) PlanInterface(ctx context.Context, transactionID string, iface
 	}
 
 	now := m.clock.Now()
-	plan := Plan{TransactionID: transactionID, Interface: iface, Peers: peers}
+	plan := Plan{TransactionID: transactionID, Interface: iface, Peers: peers, Labels: labels}
 
 	add := func(kind OperationKind, target, detail string, existed bool) {
 		plan.Operations = append(plan.Operations, Operation{
@@ -117,8 +127,16 @@ func (m *Manager) PlanInterface(ctx context.Context, transactionID string, iface
 	add(OpSetLinkUp, iface.Name, fmt.Sprintf("bring %s up", iface.Name), interfaceExisted)
 
 	for _, peer := range peers {
+		label := peer.PublicKey.Short()
+		for _, known := range labels {
+			if known.PublicKey == peer.PublicKey.String() {
+				label = known.Name
+				break
+			}
+		}
+
 		add(OpApplyPeer, peer.PublicKey.String(),
-			fmt.Sprintf("peer %s with %d allowed prefixes", peer.PublicKey.Short(), len(peer.AllowedIPs)),
+			fmt.Sprintf("peer %s with %d allowed prefix(es)", label, len(peer.AllowedIPs)),
 			interfaceExisted && containsPeer(existing.Peers, peer.PublicKey))
 	}
 

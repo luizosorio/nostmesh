@@ -7,9 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/luizosorio/nostmesh/internal/netstate"
 )
 
 func execute(t *testing.T, args ...string) (stdout, stderr string, code int) {
@@ -291,54 +288,21 @@ func writeValidConfig(t *testing.T, stateDir string) string {
 	return path
 }
 
-func TestStatusReportsConfiguration(t *testing.T) {
-	stateDir := t.TempDir()
-	configPath := writeValidConfig(t, stateDir)
-
-	stdout, stderr, code := execute(t, "status", "--config", configPath)
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
+// Status needs the netlink socket to report observed state. Without privileges
+// it must say so rather than emit a raw syscall error.
+func TestStatusWithoutPrivileges(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; this test checks the unprivileged failure path")
 	}
 
-	for _, want := range []string{"lab", "lab-a", "198.51.100.10:51820", "no interrupted transactions"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("status must mention %q, got: %q", want, stdout)
-		}
-	}
-}
+	configPath := writeValidConfig(t, t.TempDir())
 
-// An interrupted transaction is exactly what an operator needs surfaced: it
-// means the host may be carrying state nothing is tracking.
-func TestStatusSurfacesInterruptedTransaction(t *testing.T) {
-	stateDir := t.TempDir()
-	configPath := writeValidConfig(t, stateDir)
-
-	journal := netstate.NewJournalStore(filepath.Join(stateDir, "journal"))
-	transaction := netstate.NewTransaction("tx-abandoned", "nm0", time.Now())
-	if err := transaction.Plan(netstate.Operation{
-		ID:     "op-1",
-		Kind:   netstate.OpCreateInterface,
-		Target: "nm0",
-		Detail: "wireguard interface nm0",
-	}, time.Now()); err != nil {
-		t.Fatalf("planning: %v", err)
+	_, stderr, code := execute(t, "status", "--config", configPath)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
-	if err := transaction.MarkApplying("op-1"); err != nil {
-		t.Fatalf("marking applying: %v", err)
-	}
-	if err := journal.Save(transaction); err != nil {
-		t.Fatalf("saving journal: %v", err)
-	}
-
-	stdout, stderr, code := execute(t, "status", "--config", configPath)
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitOK, stderr)
-	}
-
-	for _, want := range []string{"interrupted", "tx-abandoned", "partial state"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("status must mention %q, got: %q", want, stdout)
-		}
+	if !strings.Contains(stderr, "nostmesh status") {
+		t.Errorf("error must name the command, got: %q", stderr)
 	}
 }
 
@@ -368,28 +332,27 @@ func TestUpDryRunDescribesWithoutApplying(t *testing.T) {
 	}
 }
 
-// A command that half works is worse than one that says it is not ready.
-func TestUpWithoutDryRunReportsNotImplemented(t *testing.T) {
+// Applying and tearing down need the netlink socket, so without privileges they
+// must fail with a message naming the missing prerequisite rather than a raw
+// syscall error.
+func TestUpAndDownReportMissingPrivileges(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; this test checks the unprivileged failure path")
+	}
+
 	configPath := writeValidConfig(t, t.TempDir())
 
-	_, stderr, code := execute(t, "up", "--config", configPath)
-	if code != exitError {
-		t.Errorf("exit code = %d, want %d", code, exitError)
-	}
-	if !strings.Contains(stderr, "M0.4") {
-		t.Errorf("error must say when this arrives, got: %q", stderr)
-	}
-}
+	for _, command := range []string{"up", "down"} {
+		t.Run(command, func(t *testing.T) {
+			_, stderr, code := execute(t, command, "--config", configPath)
 
-func TestDownWithNothingToReconcile(t *testing.T) {
-	configPath := writeValidConfig(t, t.TempDir())
-
-	stdout, _, code := execute(t, "down", "--config", configPath)
-	if code != exitOK {
-		t.Errorf("exit code = %d, want %d", code, exitOK)
-	}
-	if !strings.Contains(stdout, "nothing to reconcile") {
-		t.Errorf("expected a no-op message, got: %q", stdout)
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d", code, exitError)
+			}
+			if !strings.Contains(stderr, "nostmesh "+command) {
+				t.Errorf("error must name the command, got: %q", stderr)
+			}
+		})
 	}
 }
 

@@ -87,6 +87,22 @@ func (n Node) validate() Errors {
 		errs = append(errs, Error{"node.state_dir", fmt.Sprintf("must be an absolute path, got %q", n.StateDir)})
 	}
 
+	if n.OverlayAddress != "" {
+		if _, err := netip.ParsePrefix(n.OverlayAddress); err != nil {
+			errs = append(errs, Error{"node.overlay_address", fmt.Sprintf("must be an address in CIDR notation, got %q", n.OverlayAddress)})
+		}
+	}
+
+	if n.ListenPort < 0 || n.ListenPort > 65535 {
+		errs = append(errs, Error{"node.listen_port", fmt.Sprintf("must be between 0 and 65535, got %d", n.ListenPort)})
+	}
+
+	// Below the IPv6 minimum an interface cannot carry a conforming packet;
+	// above 1500 it would exceed a standard Ethernet path and fragment.
+	if n.MTU != 0 && (n.MTU < 1280 || n.MTU > 1500) {
+		errs = append(errs, Error{"node.mtu", fmt.Sprintf("must be between 1280 and 1500, got %d", n.MTU)})
+	}
+
 	return errs
 }
 
