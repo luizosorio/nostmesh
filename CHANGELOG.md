@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Identity and session domain: node and peer identities, tunnel key bindings,
+  and the session state machine (M0.2).
+- Private key types that cannot be printed, logged or serialized, with a single
+  sanctioned escape enforced by an architecture test.
+- Development file keystore with atomic writes, owner-only permissions, and
+  refusal to load a key whose permissions have been relaxed.
+- `nostmesh identity init` and `nostmesh identity show`.
+- ADRs NM-06 (key separation and secret handling) and NM-07 (deferred Nostr key
+  derivation, to be superseded in M1.1).
+
 - Project foundation: module layout, build tooling and CI (M0.1).
 - `nostmesh version` and `nostmesh config validate` commands.
 - Declarative configuration with deny-by-default policy and validation that

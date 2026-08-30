@@ -32,6 +32,7 @@ func commands() []command {
 	return []command{
 		{"version", "Print build information", runVersion},
 		{"config", "Inspect and validate configuration", runConfig},
+		{"identity", "Manage this node's identity", runIdentity},
 	}
 }
 

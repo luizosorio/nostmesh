@@ -112,6 +112,9 @@ Containers are how this project develops and tests, not how it ships. See
 ```bash
 nostmesh version
 nostmesh config validate examples/nostmesh.json
+
+nostmesh identity init --state-dir ./state    # generate this node's identity
+nostmesh identity show --state-dir ./state    # public key only
 ```
 
 Configuration is declarative and validated before it can influence anything.
@@ -158,6 +161,27 @@ portable long before adapters for them exist.
 Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/), numbered `NM-01`
 onward. Changing one means writing a new ADR that supersedes it, never editing
 history.
+
+## Handling of keys
+
+Two secrets exist, with different lifetimes and different consequences if they
+leak. They are separate types, and neither can be printed, logged or serialized
+by accident: every path that would normally reveal a value yields `[REDACTED]`
+instead, and JSON encoding fails outright rather than emitting a placeholder
+that looks like data.
+
+There is exactly one sanctioned way to get raw key material out, reserved for
+the development keystore, and an architecture test fails the build if anything
+else calls it. See [NM-06](docs/adr/NM-06-key-separation-and-secret-handling.md).
+
+The file keystore writes the key to disk unprotected and is for development
+only. Production deployments are expected to use an external signer that never
+surrenders the private key.
+
+> Nostr public key derivation is currently a development placeholder, not a real
+> secp256k1 key — see [NM-07](docs/adr/NM-07-deferred-nostr-key-derivation.md).
+> Identities created now are not valid Nostr identities and will not carry
+> forward past MVP 1.
 
 ## Roadmap
 

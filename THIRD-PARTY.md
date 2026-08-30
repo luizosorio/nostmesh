@@ -1,9 +1,12 @@
 # Third-party licenses
 
-This project currently has no third-party dependencies.
+| Module | Version | License |
+|---|---|---|
+| `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 
-When dependencies are added, this file is regenerated automatically by CI and
-must list every module, its version, and its license.
+`golang.org/x/crypto` supplies the Curve25519 implementation used to derive
+WireGuard public keys. It is maintained by the Go team, carries the same
+permissive terms as the standard library, and requires no cgo.
 
 ## Policy
 
