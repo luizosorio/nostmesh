@@ -37,10 +37,13 @@ jobs:
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...
 
+      # go.sum only exists once there is a dependency, so it is checked
+      # conditionally rather than assumed to be present.
       - name: Verify module tidiness
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum
+          git diff --exit-code go.mod
+          if [ -f go.sum ]; then git diff --exit-code go.sum; fi
 
   lint:
     name: Lint

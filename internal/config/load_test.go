@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,10 +96,13 @@ func TestLoadRejects(t *testing.T) {
 // A typo in a security-relevant key must fail loudly rather than leave the
 // intended setting silently at its default.
 func TestLoadRejectsTypoInSecuritySetting(t *testing.T) {
-	content := `{
+	// The key is misspelled on purpose. It is assembled here rather than
+	// written literally so that spell checkers do not "fix" the test subject.
+	typo := "accept_def" + "ualt_route"
+	content := fmt.Sprintf(`{
       "node": {"name": "lab", "state_dir": "/var/lib/nostmesh"},
-      "policy": {"accept_defualt_route": true}
-    }`
+      "policy": {%q: true}
+    }`, typo)
 
 	_, err := Load(writeConfig(t, content))
 	if err == nil {

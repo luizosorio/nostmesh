@@ -79,5 +79,7 @@ type output struct {
 }
 
 func (o *output) printf(format string, args ...any) {
-	fmt.Fprintf(o.w, format, args...)
+	// A failed write to stdout or stderr leaves nothing useful to do: reporting
+	// it would need the same broken stream. The error is dropped deliberately.
+	_, _ = fmt.Fprintf(o.w, format, args...)
 }

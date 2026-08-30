@@ -20,7 +20,9 @@ const maxConfigSize = 1 << 20 // 1 MiB
 // safe default. The returned configuration is always valid; on any problem the
 // error explains what to fix and the configuration must not be used.
 func Load(path string) (Config, error) {
-	file, err := os.Open(path)
+	// The path is supplied by the operator on the command line; reading an
+	// arbitrary file they name is the entire purpose of this function.
+	file, err := os.Open(path) //nolint:gosec // operator-supplied path by design
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -31,7 +33,8 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("opening configuration: %w", err)
 		}
 	}
-	defer file.Close()
+	// Read-only: a failed close cannot affect what was already parsed.
+	defer func() { _ = file.Close() }()
 
 	info, err := file.Stat()
 	if err != nil {

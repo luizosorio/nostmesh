@@ -133,15 +133,12 @@ func validatePeers(peers []Peer) Errors {
 			return fmt.Sprintf("peers[%d].%s", i, name)
 		}
 
-		switch {
-		case peer.Name == "":
+		if peer.Name == "" {
 			errs = append(errs, Error{field("name"), "must not be empty; set a local label for this peer"})
-		default:
-			if first, dup := seenNames[peer.Name]; dup {
-				errs = append(errs, Error{field("name"), fmt.Sprintf("duplicates peers[%d].name %q; names must be unique", first, peer.Name)})
-			} else {
-				seenNames[peer.Name] = i
-			}
+		} else if first, dup := seenNames[peer.Name]; dup {
+			errs = append(errs, Error{field("name"), fmt.Sprintf("duplicates peers[%d].name %q; names must be unique", first, peer.Name)})
+		} else {
+			seenNames[peer.Name] = i
 		}
 
 		errs = append(errs, validatePeerKey(peer.PublicKey, field("public_key"), seenKeys, i)...)
