@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Verify module tidiness
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  portability:
+    name: Portability guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # The core must stay free of the operating system. Compiling for targets
+      # that are out of scope proves the boundary holds before an adapter for
+      # them is ever written.
+      - name: Cross-compile
+        run: |
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "building $os/$arch"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null ./...
+          done
+
+  licenses:
+    name: License policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Strong copyleft propagates its terms to the combined work, which would
+      # conflict with the project's goal of unrestricted commercial use.
+      - name: Check dependency licenses
+        run: |
+          go install github.com/google/go-licenses@latest
+          go-licenses check ./... \
+            --disallowed_types=forbidden,restricted,reciprocal
+
+      - name: Verify no unexpected dependencies
+        run: |
+          if [ -f go.sum ] && [ -s go.sum ]; then
+            echo "Dependencies present; THIRD-PARTY.md must list them."
+            grep -q "no third-party dependencies" THIRD-PARTY.md && {
+              echo "THIRD-PARTY.md still claims there are none. Regenerate it."
+              exit 1
+            }
+          fi
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
