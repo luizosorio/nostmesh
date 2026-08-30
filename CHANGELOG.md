@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-08-30
+
+First tagged release: **MVP 0 complete**.
+
+Two Linux hosts can establish an authenticated WireGuard tunnel through
+NostMesh, configured by hand. There is no Nostr, no NAT traversal and no
+discovery — those arrive in MVP 1. What this release provides is a foundation
+whose guarantees are demonstrated against a real kernel rather than asserted.
+
+**Proven, not assumed:**
+
+- A tunnel carries ICMP and TCP in both directions between two network
+  namespaces.
+- A failure at any step of an apply leaves no interface, address or route
+  behind, verified by injecting one at each of five steps.
+- A hundred setup and teardown cycles leave link and route counts unchanged.
+- NostMesh never removes an interface it does not own, including during
+  rollback.
+- Private keys cannot be printed, logged or serialized; the one sanctioned
+  escape is guarded by an architecture test.
+
+**Known limitations:**
+
+- Public keys and endpoints are exchanged by hand.
+- Nostr key derivation is a development placeholder, not secp256k1 (NM-07); it
+  must be replaced in M1.1, and identities created now will not carry forward.
+- The file keystore stores a private key on disk unprotected. It is for
+  development only.
+- Benchmarks establish a baseline; they do not measure RNF-PERF, which needs two
+  hosts and a real link.
+- Linux only. The core compiles for Windows and macOS, but no adapter exists.
+
+This release has not been audited. Do not rely on it to protect anything that
+matters.
+
+
 ### Added
 
 - Interruption tests against a real kernel: a failure at any step of an apply
