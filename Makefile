@@ -7,6 +7,8 @@ BINARY      := nostmesh
 GO          ?= go
 # The full image, not alpine: the race detector requires a C toolchain.
 GO_IMAGE    ?= golang:1.25
+# Pinned so local runs and CI analyze with the same linter version.
+LINT_IMAGE  ?= golangci/golangci-lint:v2.13.2
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE        ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -50,6 +52,13 @@ fmt-check:
 .PHONY: lint
 lint:
 	golangci-lint run
+
+# Lint in its own image, matching the version CI uses.
+.PHONY: docker-lint
+docker-lint:
+	docker run --rm -v "$(PWD)":/src -w /src \
+		-e GOFLAGS=-buildvcs=false \
+		$(LINT_IMAGE) golangci-lint run
 
 # The core must stay free of the operating system. Building for out-of-scope
 # targets proves the boundary holds before an adapter for them exists.

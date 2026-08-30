@@ -55,9 +55,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - uses: golangci/golangci-lint-action@v6
+      # v8 of the action matches golangci-lint v2, which is the schema
+      # .golangci.yml is written against. The v6 action installs the v1 line
+      # and rejects that config outright.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.13.2
 
   portability:
     name: Portability guard

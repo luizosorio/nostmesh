@@ -26,9 +26,13 @@ distributed as a single static binary that users install directly.
 
 ```bash
 make docker-check     # format, vet, tests, portability guard
+make docker-lint      # golangci-lint, pinned to the CI version
 make docker-build     # produces bin/nostmesh
 make docker-test      # tests only
 ```
+
+`check` and `lint` are separate because the linter runs in its own image. CI
+runs both, so run both before opening a PR.
 
 Every `make` target is available with a `docker-` prefix. Without the prefix,
 targets run against a local Go 1.25 toolchain if you prefer that.

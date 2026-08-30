@@ -24,10 +24,14 @@ Every target works with a `docker-` prefix. Without it, targets use a local Go
 | `build` | Static CGO-free binary into `bin/` |
 | `test` | Tests with the race detector |
 | `cover` | Tests with a coverage summary |
-| `lint` | golangci-lint |
+| `lint` | golangci-lint (`make docker-lint` uses the pinned CI version) |
 | `portability` | Cross-compile for Linux, Windows and macOS |
 | `fmt` | Format the tree |
 | `clean` | Remove build output |
+
+The linter version is pinned in the Makefile and in CI so both analyze with the
+same rules. Run `make docker-lint` before opening a PR — `make check` does not
+include it, since it needs a different image.
 
 ## Privileged tests
 
