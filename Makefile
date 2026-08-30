@@ -80,6 +80,31 @@ portability:
 test-privileged:
 	$(GO) test -tags privileged -count=1 ./test/integration/...
 
+# Coverage across both suites. The netlink adapter has no unit tests by design —
+# it is a thin layer over the kernel, and testing it without one proves nothing —
+# so its coverage comes from the privileged suite via -coverpkg. Measuring only
+# the default suite reports 0% for it and hides how much is actually exercised.
+.PHONY: cover-all
+cover-all:
+	$(GO) test -tags privileged -count=1 \
+		-coverpkg=./internal/...,./cmd/... \
+		-coverprofile=coverage-all.out \
+		./... 
+	@echo
+	@$(GO) tool cover -func=coverage-all.out | tail -1
+	@echo
+	@echo "per package:"
+	@$(GO) tool cover -func=coverage-all.out | \
+		awk -F/ '{print $$0}' | \
+		grep -oE 'nostmesh/[a-z/]+\.go' | sort -u | \
+		sed 's|nostmesh/||' | cut -d/ -f1-2 | sort -u
+
+.PHONY: docker-cover-all
+docker-cover-all:
+	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \
+		-e GOFLAGS=-buildvcs=false \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make cover-all'
+
 .PHONY: docker-test-privileged
 docker-test-privileged:
 	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \

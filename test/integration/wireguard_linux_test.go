@@ -28,7 +28,7 @@ import (
 // per-thread property in Linux: without the lock the Go runtime could move the
 // goroutine to a thread still in the original namespace, and the test would
 // silently configure the host instead.
-func withNamespace(t *testing.T, fn func()) {
+func withNamespace(t testing.TB, fn func()) {
 	t.Helper()
 
 	runtime.LockOSThread()
@@ -58,7 +58,7 @@ func withNamespace(t *testing.T, fn func()) {
 	fn()
 }
 
-func requirePrivileges(t *testing.T) {
+func requirePrivileges(t testing.TB) {
 	t.Helper()
 
 	if os.Geteuid() != 0 {
@@ -66,7 +66,7 @@ func requirePrivileges(t *testing.T) {
 	}
 }
 
-func testPrivateKey(t *testing.T, seed byte) domain.WireGuardPrivateKey {
+func testPrivateKey(t testing.TB, seed byte) domain.WireGuardPrivateKey {
 	t.Helper()
 
 	raw := make([]byte, domain.WireGuardKeySize)
@@ -80,7 +80,7 @@ func testPrivateKey(t *testing.T, seed byte) domain.WireGuardPrivateKey {
 	return key
 }
 
-func testPublicKey(t *testing.T, seed byte) domain.WireGuardPublicKey {
+func testPublicKey(t testing.TB, seed byte) domain.WireGuardPublicKey {
 	t.Helper()
 
 	var key domain.WireGuardPublicKey
@@ -90,7 +90,7 @@ func testPublicKey(t *testing.T, seed byte) domain.WireGuardPublicKey {
 	return key
 }
 
-func testSpec(t *testing.T, name string) wireguard.InterfaceSpec {
+func testSpec(t testing.TB, name string) wireguard.InterfaceSpec {
 	t.Helper()
 
 	return wireguard.InterfaceSpec{

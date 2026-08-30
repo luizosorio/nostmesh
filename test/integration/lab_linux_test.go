@@ -28,7 +28,7 @@ import (
 // tunnel runs over that link, so the test exercises the real data path: kernel
 // WireGuard, real UDP, real encryption — not a simulation.
 type lab struct {
-	t *testing.T
+	t testing.TB
 
 	alice netns.NsHandle
 	bob   netns.NsHandle
@@ -53,7 +53,7 @@ const (
 )
 
 // newLab builds the two namespaces and the link between them.
-func newLab(t *testing.T) *lab {
+func newLab(t testing.TB) *lab {
 	t.Helper()
 
 	runtime.LockOSThread()
@@ -260,7 +260,7 @@ func (l *lab) waitForHandshake() {
 // This is done natively rather than by running ping: the test image then needs
 // no extra package, and the project's own rule against shelling out applies to
 // its tests too.
-func sendICMPEcho(t *testing.T, target string, timeout time.Duration) error {
+func sendICMPEcho(t testing.TB, target string, timeout time.Duration) error {
 	t.Helper()
 
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
