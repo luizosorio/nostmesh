@@ -92,6 +92,15 @@ suite.
 `make docker-cover-all` runs both with `-coverpkg` and reports the true figure.
 Use it before claiming a coverage number.
 
+### File ownership
+
+Container targets run as the calling user, so anything they write is yours.
+
+The privileged targets are the exception: they need root for `NET_ADMIN`, so
+what they write lands owned by root. `make docker-cover-all` restores ownership
+afterwards; if you run a privileged container by hand and end up with files you
+cannot remove, `make fix-ownership` fixes it without sudo.
+
 ## Fuzzing
 
 The protocol parsers are what a hostile relay reaches first, so a panic there is

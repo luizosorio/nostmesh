@@ -7,6 +7,20 @@ BINARY      := nostmesh
 GO          ?= go
 # The full image, not alpine: the race detector requires a C toolchain.
 GO_IMAGE    ?= golang:1.25
+
+# Run containers as the calling user. Without this, anything a container writes
+# — fuzz corpus, coverage profiles, build output — lands owned by root, and the
+# user can neither remove nor commit it.
+DOCKER_USER ?= $(shell id -u):$(shell id -g)
+
+# A non-root user in the container has no home directory, so Go and
+# golangci-lint cannot create their build caches. HOME and the cache paths have
+# to point somewhere writable or every target fails on a permission error.
+DOCKER_ENV := -e GOFLAGS=-buildvcs=false \
+	-e HOME=/tmp \
+	-e GOCACHE=/tmp/.gocache \
+	-e GOMODCACHE=/tmp/.gomodcache \
+	-e GOLANGCI_LINT_CACHE=/tmp/.lintcache
 # Pinned so local runs and CI analyze with the same linter version.
 LINT_IMAGE  ?= golangci/golangci-lint:v2.13.2
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -56,8 +70,8 @@ lint:
 # Lint in its own image, matching the version CI uses.
 .PHONY: docker-lint
 docker-lint:
-	docker run --rm -v "$(PWD)":/src -w /src \
-		-e GOFLAGS=-buildvcs=false \
+	docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
+		$(DOCKER_ENV) \
 		$(LINT_IMAGE) golangci-lint run
 
 # The core must stay free of the operating system. Building for out-of-scope
@@ -116,9 +130,9 @@ fuzz:
 
 .PHONY: docker-fuzz
 docker-fuzz:
-	docker run --rm -v "$(PWD)":/src -w /src \
-		-e GOFLAGS=-buildvcs=false -e FUZZTIME=$(FUZZTIME) \
-		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make fuzz'
+	docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
+		$(DOCKER_ENV) -e FUZZTIME=$(FUZZTIME) \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src 2>/dev/null; make fuzz'
 
 # Baseline measurements, not a performance claim. See docs/benchmarks.md for
 # what this setup does and does not measure.
@@ -132,11 +146,14 @@ docker-bench:
 		-e GOFLAGS=-buildvcs=false \
 		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make bench'
 
+# Privileged targets need root for NET_ADMIN, so what they write lands owned by
+# root. Ownership is restored afterwards, or the user cannot remove it.
 .PHONY: docker-cover-all
 docker-cover-all:
 	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \
 		-e GOFLAGS=-buildvcs=false \
 		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make cover-all'
+	@$(MAKE) --no-print-directory fix-ownership
 
 .PHONY: docker-test-privileged
 docker-test-privileged:
@@ -147,13 +164,19 @@ docker-test-privileged:
 .PHONY: check
 check: fmt-check vet test portability
 
+# Restore ownership of anything a privileged container wrote, without sudo.
+.PHONY: fix-ownership
+fix-ownership:
+	@docker run --rm -v "$(PWD)":/src -w /src alpine \
+		sh -c 'chown -R $(DOCKER_USER) /src 2>/dev/null || true'
+
 .PHONY: clean
 clean:
-	rm -rf bin coverage.out
+	rm -rf bin coverage.out coverage-all.out
 
 # Run any target inside the Go container, matching CI and the remote host.
 .PHONY: docker-%
 docker-%:
-	docker run --rm -v "$(PWD)":/src -w /src \
-		-e GOFLAGS=-buildvcs=false \
-		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make $*' 
+	docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
+		$(DOCKER_ENV) \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src 2>/dev/null; make $*' 
