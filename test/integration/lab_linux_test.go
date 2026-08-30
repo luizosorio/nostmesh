@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os/exec"
+	"os"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
@@ -237,7 +239,7 @@ func (l *lab) waitForHandshake() {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		// Traffic is what triggers the handshake, so send some.
-		_ = exec.Command("ping", "-c", "1", "-W", "1", "100.96.0.2").Run()
+		_ = sendICMPEcho(l.t, "100.96.0.2", time.Second)
 
 		state, err := adapter.ObserveInterface(context.Background(), "nm0")
 		if err == nil {
@@ -251,6 +253,61 @@ func (l *lab) waitForHandshake() {
 	}
 
 	l.t.Fatal("no handshake within 10s; the tunnel did not come up")
+}
+
+// sendICMPEcho sends one echo request through the tunnel and waits for a reply.
+//
+// This is done natively rather than by running ping: the test image then needs
+// no extra package, and the project's own rule against shelling out applies to
+// its tests too.
+func sendICMPEcho(t *testing.T, target string, timeout time.Duration) error {
+	t.Helper()
+
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		return fmt.Errorf("opening icmp socket: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	message := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Body: &icmp.Echo{
+			ID:   os.Getpid() & 0xffff,
+			Seq:  1,
+			Data: []byte("nostmesh"),
+		},
+	}
+	encoded, err := message.Marshal(nil)
+	if err != nil {
+		return fmt.Errorf("encoding echo request: %w", err)
+	}
+
+	addr, err := net.ResolveIPAddr("ip4", target)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", target, err)
+	}
+	if _, err := conn.WriteTo(encoded, addr); err != nil {
+		return fmt.Errorf("sending echo request: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("setting deadline: %w", err)
+	}
+
+	reply := make([]byte, 1500)
+	n, _, err := conn.ReadFrom(reply)
+	if err != nil {
+		return fmt.Errorf("waiting for echo reply: %w", err)
+	}
+
+	parsed, err := icmp.ParseMessage(1, reply[:n])
+	if err != nil {
+		return fmt.Errorf("parsing reply: %w", err)
+	}
+	if parsed.Type != ipv4.ICMPTypeEchoReply {
+		return fmt.Errorf("expected an echo reply, got %v", parsed.Type)
+	}
+	return nil
 }
 
 // TestLabTunnelCarriesICMP proves packets traverse the tunnel, not just that
@@ -274,9 +331,8 @@ func TestLabTunnelCarriesICMP(t *testing.T) {
 				t.Fatalf("entering namespace: %v", err)
 			}
 
-			output, err := exec.Command("ping", "-c", "3", "-W", "2", direction.target).CombinedOutput()
-			if err != nil {
-				t.Fatalf("ping %s failed: %v\n%s", direction.target, err, output)
+			if err := sendICMPEcho(t, direction.target, 3*time.Second); err != nil {
+				t.Fatalf("icmp to %s failed: %v", direction.target, err)
 			}
 		})
 	}
@@ -372,8 +428,10 @@ func TestLabCountersAdvance(t *testing.T) {
 		t.Fatalf("expected 1 peer, got %d", len(before.Peers))
 	}
 
-	if output, err := exec.Command("ping", "-c", "5", "-W", "2", "100.96.0.2").CombinedOutput(); err != nil {
-		t.Fatalf("generating traffic: %v\n%s", err, output)
+	for i := 0; i < 5; i++ {
+		if err := sendICMPEcho(t, "100.96.0.2", 3*time.Second); err != nil {
+			t.Fatalf("generating traffic: %v", err)
+		}
 	}
 
 	after, err := adapter.ObserveInterface(ctx, "nm0")
