@@ -508,3 +508,154 @@ func TestLabTeardownLeavesNothing(t *testing.T) {
 		t.Errorf("teardown removed the transport link: %v", err)
 	}
 }
+
+// TestLabHundredCyclesLeaveNoResidue is the MVP 0 gate: repeated setup and
+// teardown must not accumulate interfaces, addresses or routes.
+//
+// A leak that appears only after many cycles is the kind that shows up in
+// production and not in a single-run test, which is why the count is high.
+func TestLabHundredCyclesLeaveNoResidue(t *testing.T) {
+	requirePrivileges(t)
+
+	if testing.Short() {
+		t.Skip("skipping the 100-cycle gate in short mode")
+	}
+
+	l := newLab(t)
+
+	if err := netns.Set(l.alice); err != nil {
+		t.Fatalf("entering alice's namespace: %v", err)
+	}
+
+	adapter, err := wireguard.NewLinuxAdapter()
+	if err != nil {
+		t.Fatalf("opening adapter: %v", err)
+	}
+	defer func() { _ = adapter.Close() }()
+
+	ctx := context.Background()
+	endpoint := netip.MustParseAddrPort(fmt.Sprintf("10.99.0.2:%d", bobPort))
+
+	linksBefore, err := netlink.LinkList()
+	if err != nil {
+		t.Fatalf("listing links: %v", err)
+	}
+	routesBefore, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
+	if err != nil {
+		t.Fatalf("listing routes: %v", err)
+	}
+
+	for cycle := 1; cycle <= 100; cycle++ {
+		if _, err := adapter.EnsureInterface(ctx, wireguard.InterfaceSpec{
+			Name:       "nm0",
+			PrivateKey: l.aliceKey,
+			ListenPort: alicePort,
+			Addresses:  []netip.Prefix{netip.MustParsePrefix(aliceOverlay)},
+			MTU:        1420,
+		}); err != nil {
+			t.Fatalf("cycle %d: creating interface: %v", cycle, err)
+		}
+
+		if err := adapter.ApplyPeer(ctx, "nm0", wireguard.PeerSpec{
+			PublicKey:  l.bobPub,
+			Endpoint:   &endpoint,
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix(bobOverlay)},
+		}); err != nil {
+			t.Fatalf("cycle %d: applying peer: %v", cycle, err)
+		}
+
+		if err := adapter.RemoveInterface(ctx, "nm0"); err != nil {
+			t.Fatalf("cycle %d: removing interface: %v", cycle, err)
+		}
+	}
+
+	linksAfter, err := netlink.LinkList()
+	if err != nil {
+		t.Fatalf("listing links: %v", err)
+	}
+	if len(linksAfter) != len(linksBefore) {
+		t.Errorf("link count changed after 100 cycles: %d -> %d", len(linksBefore), len(linksAfter))
+		for _, link := range linksAfter {
+			t.Logf("  present: %s (%s)", link.Attrs().Name, link.Type())
+		}
+	}
+
+	routesAfter, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
+	if err != nil {
+		t.Fatalf("listing routes: %v", err)
+	}
+	if len(routesAfter) != len(routesBefore) {
+		t.Errorf("route count changed after 100 cycles: %d -> %d", len(routesBefore), len(routesAfter))
+		for _, route := range routesAfter {
+			t.Logf("  present: %v", route.Dst)
+		}
+	}
+
+	if _, err := adapter.ObserveInterface(ctx, "nm0"); err == nil {
+		t.Error("the interface survived the final teardown")
+	}
+}
+
+// TestLabPeerRemovalTakesItsRoutes confirms a peer removed on its own does not
+// leave a route pointing at something that no longer exists.
+func TestLabPeerRemovalTakesItsRoutes(t *testing.T) {
+	requirePrivileges(t)
+
+	l := newLab(t)
+
+	if err := netns.Set(l.alice); err != nil {
+		t.Fatalf("entering alice's namespace: %v", err)
+	}
+
+	adapter, err := wireguard.NewLinuxAdapter()
+	if err != nil {
+		t.Fatalf("opening adapter: %v", err)
+	}
+	defer func() { _ = adapter.Close() }()
+
+	ctx := context.Background()
+
+	if _, err := adapter.EnsureInterface(ctx, wireguard.InterfaceSpec{
+		Name:       "nm0",
+		PrivateKey: l.aliceKey,
+		ListenPort: alicePort,
+		Addresses:  []netip.Prefix{netip.MustParsePrefix(aliceOverlay)},
+		MTU:        1420,
+	}); err != nil {
+		t.Fatalf("creating interface: %v", err)
+	}
+
+	endpoint := netip.MustParseAddrPort(fmt.Sprintf("10.99.0.2:%d", bobPort))
+	if err := adapter.ApplyPeer(ctx, "nm0", wireguard.PeerSpec{
+		PublicKey:  l.bobPub,
+		Endpoint:   &endpoint,
+		AllowedIPs: []netip.Prefix{netip.MustParsePrefix(bobOverlay)},
+	}); err != nil {
+		t.Fatalf("applying peer: %v", err)
+	}
+
+	routed := func() bool {
+		routes, listErr := netlink.RouteList(nil, netlink.FAMILY_V4)
+		if listErr != nil {
+			t.Fatalf("listing routes: %v", listErr)
+		}
+		for _, route := range routes {
+			if route.Dst != nil && route.Dst.String() == bobOverlay {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !routed() {
+		t.Fatal("applying a peer must install a route for its allowed prefixes")
+	}
+
+	if err := adapter.RemovePeer(ctx, "nm0", l.bobPub); err != nil {
+		t.Fatalf("removing peer: %v", err)
+	}
+
+	if routed() {
+		t.Error("removing a peer left its route behind")
+	}
+}
