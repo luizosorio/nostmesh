@@ -114,8 +114,14 @@ nostmesh version
 nostmesh config validate examples/nostmesh.json
 
 nostmesh identity init --state-dir ./state    # generate this node's identity
-nostmesh identity show --state-dir ./state    # public key only
+nostmesh peer add --config nostmesh.json ...  # describe the other side
+sudo nostmesh up --config nostmesh.json       # bring the tunnel up
+nostmesh status --config nostmesh.json        # configured vs. observed
+sudo nostmesh down --config nostmesh.json     # remove what NostMesh applied
 ```
+
+For a walk-through of establishing a tunnel between two hosts, see the
+[manual tunnel tutorial](docs/tutorial-manual-tunnel.md).
 
 Configuration is declarative and validated before it can influence anything.
 Invalid input fails with a message naming the field and stating what is
@@ -187,7 +193,7 @@ surrenders the private key.
 
 | Stage | Delivers |
 |---|---|
-| **MVP 0** | Foundation and manual WireGuard tunnel between two Linux hosts |
+| **MVP 0** ✅ | Foundation and manual WireGuard tunnel between two Linux hosts |
 | MVP 1 | Nostr control plane, NAT traversal, direct connection |
 | MVP 2 | Mesh, local policy, private route announcements |
 | MVP 3 | Data relay fallback for symmetric NAT |

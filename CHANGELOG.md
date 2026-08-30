@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Orchestrator: brings the tunnel up transactionally, tears it down, and
+  reconciles the journal after an interrupted run (M0.4).
+- Routes installed for each peer's allowed prefixes, and removed with the peer.
+- `nostmesh peer add/list/remove`, `up`, `down`, `status` and `doctor`.
+- Two-namespace lab proving ICMP and TCP flow through a real tunnel, plus a
+  hundred-cycle gate confirming no interfaces or routes accumulate.
+- Tutorial for establishing a manual tunnel between two hosts.
+- ADR NM-09 (routes follow AllowedIPs).
+
+### Fixed
+
+- A tunnel came up without routes, so traffic failed with "network is
+  unreachable" despite a successful handshake. Applying a peer now installs the
+  routes its allowed prefixes require.
+
 - Transactional network state: plans are built before they are applied,
   journaled at each step, and compensated in reverse on failure (M0.3).
 - Linux WireGuard adapter over netlink, with no shelling out to `wg` or `ip`.

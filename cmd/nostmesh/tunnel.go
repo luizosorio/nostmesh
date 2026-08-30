@@ -25,11 +25,11 @@ func journalDir(stateDir string) string {
 // It returns a cleanup function, because the netlink control socket must be
 // released even when the command fails.
 func buildOrchestrator(cfg config.Config) (*orchestrator.Orchestrator, func(), error) {
-	adapter, err := wireguard.NewLinuxAdapter()
+	adapter, closeAdapter, err := wireguard.NewController()
 	if err != nil {
 		return nil, func() {}, err
 	}
-	cleanup := func() { _ = adapter.Close() }
+	cleanup := func() { _ = closeAdapter() }
 
 	generator := identity.NewKeyGenerator()
 
@@ -47,7 +47,7 @@ func buildOrchestrator(cfg config.Config) (*orchestrator.Orchestrator, func(), e
 }
 
 // loadConfigFlag parses the shared --config flag.
-func loadConfigFlag(name string, args []string, stderr *output, extra func(*flag.FlagSet)) (config.Config, []string, int) {
+func loadConfigFlag(name string, args []string, stderr *output, extra func(*flag.FlagSet)) (config.Config, int) {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr.w)
 	configPath := flags.String("config", "", "path to the configuration file (required)")
@@ -56,23 +56,23 @@ func loadConfigFlag(name string, args []string, stderr *output, extra func(*flag
 	}
 
 	if err := flags.Parse(args); err != nil {
-		return config.Config{}, nil, exitUsage
+		return config.Config{}, exitUsage
 	}
 	if *configPath == "" {
 		stderr.printf("nostmesh %s: --config is required\n", name)
-		return config.Config{}, nil, exitUsage
+		return config.Config{}, exitUsage
 	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		stderr.printf("%v\n", err)
-		return config.Config{}, nil, exitError
+		return config.Config{}, exitError
 	}
-	return cfg, flags.Args(), exitOK
+	return cfg, exitOK
 }
 
 func runStatus(args []string, stdout, stderr *output) int {
-	cfg, _, code := loadConfigFlag("status", args, stderr, nil)
+	cfg, code := loadConfigFlag("status", args, stderr, nil)
 	if code != exitOK {
 		return code
 	}
@@ -173,7 +173,7 @@ func renderPending(status orchestrator.Status, stdout *output) int {
 
 func runUp(args []string, stdout, stderr *output) int {
 	var dryRun *bool
-	cfg, _, code := loadConfigFlag("up", args, stderr, func(flags *flag.FlagSet) {
+	cfg, code := loadConfigFlag("up", args, stderr, func(flags *flag.FlagSet) {
 		dryRun = flags.Bool("dry-run", false, "describe the changes without applying them")
 	})
 	if code != exitOK {
@@ -187,13 +187,13 @@ func runUp(args []string, stdout, stderr *output) int {
 	var cleanup = func() {}
 
 	if dryRun == nil || !*dryRun {
-		adapter, adapterErr := wireguard.NewLinuxAdapter()
+		adapter, closeAdapter, adapterErr := wireguard.NewController()
 		if adapterErr != nil {
 			stderr.printf("nostmesh up: %v\n", adapterErr)
 			return exitError
 		}
 		controller = adapter
-		cleanup = func() { _ = adapter.Close() }
+		cleanup = func() { _ = closeAdapter() }
 	} else {
 		controller = wireguard.NewFakeController()
 	}
@@ -246,7 +246,7 @@ func runUp(args []string, stdout, stderr *output) int {
 }
 
 func runDown(args []string, stdout, stderr *output) int {
-	cfg, _, code := loadConfigFlag("down", args, stderr, nil)
+	cfg, code := loadConfigFlag("down", args, stderr, nil)
 	if code != exitOK {
 		return code
 	}

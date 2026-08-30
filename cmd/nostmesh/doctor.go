@@ -62,7 +62,7 @@ func runDoctor(args []string, stdout, stderr *output) int {
 			checkJournal(cfg),
 			checkPeers(cfg),
 		)
-		checks = append(checks, checkWireGuard(cfg)...)
+		checks = append(checks, checkWireGuard()...)
 	}
 
 	return renderChecks(checks, stdout)
@@ -150,13 +150,13 @@ func checkPeers(cfg config.Config) checkResult {
 
 // checkWireGuard verifies the kernel side: the control socket, and whether the
 // interface is present and carrying handshakes.
-func checkWireGuard(cfg config.Config) []checkResult {
-	adapter, err := wireguard.NewLinuxAdapter()
+func checkWireGuard() []checkResult {
+	adapter, closeAdapter, err := wireguard.NewController()
 	if err != nil {
 		return []checkResult{{"wireguard", statusError,
 			fmt.Sprintf("cannot open the control socket: %v; is the wireguard module loaded and does this process have CAP_NET_ADMIN?", err)}}
 	}
-	defer func() { _ = adapter.Close() }()
+	defer func() { _ = closeAdapter() }()
 
 	checks := []checkResult{{"wireguard", statusOK, "control socket available"}}
 

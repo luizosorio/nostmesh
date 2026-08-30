@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
@@ -25,9 +24,6 @@ import (
 // One interface carries every manually configured peer, which is all MVP 0
 // needs. Multiple interfaces arrive with the mesh in MVP 2.
 const defaultInterface = "nm0"
-
-// defaultSessionLifetime bounds how long a manual session stays valid.
-const defaultSessionLifetime = 24 * time.Hour
 
 var (
 	// ErrNoPeers reports a configuration with nothing to bring up.
