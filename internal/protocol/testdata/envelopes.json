@@ -1,0 +1,326 @@
+[
+  {
+    "name": "minimal_request",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": true,
+    "reason": "a well-formed session request",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "with_reply_to",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.offer",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "reply_to": "0102030405060708090a0b0c0d0e0f10",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": true,
+    "reason": "a message referencing a prior one",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "later_sequence",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "candidate.update",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 7,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": true,
+    "reason": "ordering comes from seq, not timestamps",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "at_expiry_boundary",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268801,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": true,
+    "reason": "valid up to but not including expiry",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "future_version",
+    "envelope": {
+      "v": 2,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "a version this build does not implement",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "foreign_namespace",
+    "envelope": {
+      "v": 1,
+      "namespace": "com.example.other",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "another protocol's messages must not be parsed",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "unknown_type",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.invented",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "a type outside the closed set",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "critical_extension",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk",
+      "critical": [
+        "future.feature"
+      ]
+    },
+    "valid": false,
+    "reason": "an extension the sender called essential",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "zero_session_id",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "an all-zero identifier means uninitialized memory",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "self_addressed",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "sender and recipient must differ",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "empty_body",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": ""
+    },
+    "valid": false,
+    "reason": "an envelope with no payload",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "expired",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767265200,
+      "expires_at": 1767265260,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "outside the validity window beyond tolerated skew",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "not_yet_valid",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767272400,
+      "expires_at": 1767272460,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "claimed to start further ahead than skew allows",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "window_too_long",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767273000,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "a validity window beyond the protocol limit",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "expiry_before_creation",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268799,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "a window that closes before it opens",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  },
+  {
+    "name": "wrong_recipient",
+    "envelope": {
+      "v": 1,
+      "namespace": "org.nostmesh.experimental",
+      "type": "session.request",
+      "message_id": "0102030405060708090a0b0c0d0e0f10",
+      "session_id": "32333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f5051",
+      "seq": 0,
+      "created_at": 1767268800,
+      "expires_at": 1767268860,
+      "sender": "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283",
+      "recipient": "4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c",
+      "body": "ZW5jcnlwdGVk"
+    },
+    "valid": false,
+    "reason": "addressed to another node",
+    "local_node": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "now_unix": 1767268800
+  }
+]

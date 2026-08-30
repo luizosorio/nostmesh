@@ -13,6 +13,9 @@
 | `github.com/josharian/native` | v1.1.0 | MIT |
 | `golang.org/x/net` | v0.57.0 | BSD-3-Clause |
 | `golang.org/x/sync` | v0.10.0 | BSD-3-Clause |
+| `github.com/nbd-wtf/go-nostr` | v0.52.3 | MIT |
+| `github.com/btcsuite/btcd` | v2.3.5 | ISC |
+| `github.com/decred/dcrd` | v4.4.0 | ISC |
 
 - `golang.org/x/crypto` supplies Curve25519, used to derive WireGuard public
   keys.
@@ -21,6 +24,12 @@
   (NM-01, NM-05).
 - `vishvananda/netlink` and `netns` handle links, addresses and network
   namespaces; the rest are their netlink transport dependencies.
+
+- `go-nostr` supplies NIP-44 v2 directed encryption. **Only the `nip44`
+  subpackage is imported** — the root package pulls in a WebSocket client and
+  three JSON libraries this project does not need (NM-10), and an architecture
+  test fails the build if anything imports it.
+- `btcd/btcec` and `dcrd/secp256k1` provide secp256k1 and Schnorr signatures.
 
 All are permissive and require no cgo.
 

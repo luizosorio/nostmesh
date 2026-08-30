@@ -99,6 +99,27 @@ cover-all:
 		grep -oE 'nostmesh/[a-z/]+\.go' | sort -u | \
 		sed 's|nostmesh/||' | cut -d/ -f1-2 | sort -u
 
+# Fuzzing finds inputs that crash a parser. A hostile relay reaches the decoder
+# first, so a panic there is a denial of service any peer can trigger.
+#
+# Corpus entries under testdata/fuzz are committed: they become permanent
+# regression tests, run by the ordinary test suite.
+FUZZTIME ?= 30s
+
+.PHONY: fuzz
+fuzz:
+	@for target in FuzzDecodeEnvelope FuzzDecodePayload FuzzValidateEnvelope FuzzCheckDepth; do \
+		printf '%-24s ' "$$target"; \
+		$(GO) test -run '^$$' -fuzz "^$$target$$" -fuzztime $(FUZZTIME) ./internal/protocol/ \
+			2>&1 | grep -E '^(PASS|FAIL|.*panic)' | tail -1; \
+	done
+
+.PHONY: docker-fuzz
+docker-fuzz:
+	docker run --rm -v "$(PWD)":/src -w /src \
+		-e GOFLAGS=-buildvcs=false -e FUZZTIME=$(FUZZTIME) \
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make fuzz'
+
 # Baseline measurements, not a performance claim. See docs/benchmarks.md for
 # what this setup does and does not measure.
 .PHONY: bench
