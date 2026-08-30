@@ -26,6 +26,7 @@ Every target works with a `docker-` prefix. Without it, targets use a local Go
 | `cover` | Tests with a coverage summary (default suite only) |
 | `cover-all` | Coverage across both suites, including the netlink adapter |
 | `bench` | Baseline measurements — see [benchmarks.md](benchmarks.md) |
+| `fuzz` | Fuzz the protocol parsers (`FUZZTIME=2m make docker-fuzz` for longer) |
 | `lint` | golangci-lint (`make docker-lint` uses the pinned CI version) |
 | `portability` | Cross-compile for Linux, Windows and macOS |
 | `fmt` | Format the tree |
@@ -90,6 +91,26 @@ suite.
 
 `make docker-cover-all` runs both with `-coverpkg` and reports the true figure.
 Use it before claiming a coverage number.
+
+## Fuzzing
+
+The protocol parsers are what a hostile relay reaches first, so a panic there is
+a denial of service any peer can trigger. Four targets cover the envelope
+decoder, the payload decoder, validation, and the hand-written depth check.
+
+```bash
+make docker-fuzz              # 30s per target
+FUZZTIME=2m make docker-fuzz  # longer
+```
+
+**A `FAIL` is not necessarily a bug.** Go reports `context deadline exceeded`
+when the fuzzer slows down — which happens under container I/O contention as the
+corpus grows. Read the output: a real finding prints the panic and writes a
+crasher, while a timeout says only `context deadline exceeded`.
+
+Corpus entries under `internal/protocol/testdata/fuzz/` are committed
+deliberately. They are inputs that reached a new code path, and keeping them
+turns each into a permanent regression test that the ordinary suite runs.
 
 ## Linux requirements at runtime
 

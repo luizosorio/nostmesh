@@ -254,3 +254,154 @@ func callersOf(t *testing.T, root, identifier string) []string {
 
 	return callers
 }
+
+// transportPackages own the Nostr dependencies. Nothing else may import them.
+var transportPackages = []string{
+	"internal/nostr",
+}
+
+// forbiddenOutsideTransport lists import prefixes that couple a package to the
+// Nostr transport or its cryptography.
+var forbiddenOutsideTransport = []string{
+	"github.com/nbd-wtf/go-nostr",
+	"github.com/btcsuite/btcd",
+}
+
+// TestProtocolStaysTransportNeutral enforces NM-10: internal/protocol defines
+// envelopes and validation over bytes, and must not acquire a dependency on how
+// those bytes reach the wire. A protocol coupled to its transport cannot be
+// tested without one, and cannot be carried over a second transport later.
+func TestProtocolStaysTransportNeutral(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, pkg := range corePackages {
+		t.Run(pkg, func(t *testing.T) {
+			for _, imp := range importsOf(t, filepath.Join(root, pkg)) {
+				for _, forbidden := range forbiddenOutsideTransport {
+					if strings.HasPrefix(imp.path, forbidden) {
+						t.Errorf("%s imports %q; transport and cryptography belong to %s (see NM-10)",
+							imp.file, imp.path, strings.Join(transportPackages, ", "))
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestGoNostrRootIsNeverImported enforces the narrower half of NM-10: only the
+// nip44 subpackage may be used. The root package pulls in a WebSocket client,
+// three JSON libraries and a URL parser, none of which this project needs — the
+// relay client is ours to write.
+func TestGoNostrRootIsNeverImported(t *testing.T) {
+	root := repoRoot(t)
+	const forbidden = "github.com/nbd-wtf/go-nostr"
+
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		for _, imp := range importsInFile(t, path) {
+			// Subpackages are permitted; the root is not.
+			if imp == forbidden {
+				t.Errorf("%s imports the go-nostr root package; import only the subpackage you need (see NM-10)",
+					relative(t, path))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning repository: %v", err)
+	}
+}
+
+// privateKeyFieldNames are field names that would carry secret material if any
+// serialized structure declared one.
+var privateKeyFieldNames = []string{
+	`"private_key"`,
+	`"privkey"`,
+	`"secret_key"`,
+	`"wireguard_private"`,
+	`"nsec"`,
+}
+
+// TestNoPrivateKeyFieldsInWireTypes enforces the project's central invariant:
+// a WireGuard private key must never reach an event, the store, a log or a
+// diagnostic bundle.
+//
+// The keystore is the one place that persists key material by design (NM-06),
+// so it is exempt. Everywhere else, a struct tag naming a private key is a
+// serialization path for a secret, and this test refuses to let one appear
+// unnoticed.
+func TestNoPrivateKeyFieldsInWireTypes(t *testing.T) {
+	root := repoRoot(t)
+
+	exempt := []string{
+		// The development keystore persists the identity key deliberately.
+		"internal/identity/devkeystore.go",
+		// This test necessarily names the patterns it looks for.
+		"test/architecture/boundaries_test.go",
+	}
+
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		rel := relative(t, path)
+		if slices.Contains(exempt, rel) {
+			return nil
+		}
+
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+
+		for _, field := range privateKeyFieldNames {
+			if strings.Contains(string(content), field) {
+				t.Errorf("%s declares a %s field; private key material must never be serialized (see NM-06)",
+					rel, field)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning repository: %v", err)
+	}
+}
+
+// importsInFile returns every import path in one file.
+func importsInFile(t *testing.T, path string) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+
+	paths := make([]string, 0, len(file.Imports))
+	for _, spec := range file.Imports {
+		paths = append(paths, importPath(t, spec))
+	}
+	return paths
+}

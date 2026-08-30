@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Control protocol v1: envelope, eight message types, capability negotiation,
+  and validation in documented cheapest-first order (M1.1).
+- NIP-44 v2 directed encryption, verified against the official test vectors,
+  with the envelope's cleartext fields bound to the encrypted payload so a
+  relay cannot re-address a captured message.
+- Golden vectors covering both valid envelopes and every rejection reason.
+- Four fuzz targets over the parsers, with the discovered corpus committed as
+  permanent regression tests.
+- Architecture guards: the protocol may not import transport or cryptography,
+  the `go-nostr` root package is never imported, and no serialized type may
+  declare a private-key field.
+- `docs/protocol/v1.md`, including an explicit statement that the scheme has no
+  forward secrecy and what that would expose.
+- ADR NM-10 (Nostr cryptography and library scope), resolving Q-02.
+
 ## [0.1.0] — 2026-08-30
 
 First tagged release: **MVP 0 complete**.
