@@ -9,6 +9,7 @@ import (
 
 	"github.com/luizosorio/nostmesh/internal/connectivity"
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/session"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
@@ -59,18 +60,29 @@ func unverifiedCandidate(address string) connectivity.Candidate {
 }
 
 func newTestManager(t *testing.T) (*SessionManager, *wireguard.FakeController) {
+	manager, controller, _ := newTestManagerWithJournal(t)
+	return manager, controller
+}
+
+// newTestManagerWithJournal also returns the journal, so a test can assert that
+// a network change was recorded rather than written directly.
+func newTestManagerWithJournal(t *testing.T) (*SessionManager, *wireguard.FakeController, *netstate.JournalStore) {
 	t.Helper()
 
 	controller := wireguard.NewFakeController()
+	clock := &fixedClock{now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+
+	journal := netstate.NewJournalStore(t.TempDir())
 
 	manager, err := NewSessionManager(SessionManagerOptions{
 		Controller: controller,
-		Clock:      &fixedClock{now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)},
+		NetState:   netstate.NewManager(controller, journal, clock),
+		Clock:      clock,
 	})
 	if err != nil {
 		t.Fatalf("building manager: %v", err)
 	}
-	return manager, controller
+	return manager, controller, journal
 }
 
 // establishedSession drives a session to the established phase.
@@ -182,6 +194,67 @@ func TestRoamingKeepsSessionIdentity(t *testing.T) {
 	}
 	if after.LastRoamAt == nil {
 		t.Error("the roam must be timestamped")
+	}
+}
+
+// Every network change is transactional, attributable and reversible — and a
+// roam is a network change. Writing the new endpoint straight to the kernel
+// would leave state that no rollback could undo and no audit could explain, so
+// the roam must appear in the journal.
+func TestRoamingIsRecordedInTheJournal(t *testing.T) {
+	manager, controller, journal := newTestManagerWithJournal(t)
+	peer := nostrIdentity(t, 1)
+
+	controller.PreexistingInterface("nm0", nil)
+	establishedSession(t, manager, peer)
+
+	before, err := journal.List()
+	if err != nil {
+		t.Fatalf("listing journal: %v", err)
+	}
+
+	moved := verifiedCandidate("203.0.113.50:51820")
+	if err := manager.Roam(context.Background(), peer, moved, "nm0"); err != nil {
+		t.Fatalf("roaming: %v", err)
+	}
+
+	after, err := journal.List()
+	if err != nil {
+		t.Fatalf("listing journal: %v", err)
+	}
+
+	if len(after) <= len(before) {
+		t.Fatal("the roam wrote to the kernel without a journal entry; it cannot be rolled back or audited")
+	}
+
+	// The entry must record the peer application, or the journal knows a
+	// transaction happened without knowing what to undo.
+	var recorded bool
+	for _, transaction := range after {
+		for _, op := range transaction.Operations {
+			if op.Kind == netstate.OpApplyPeer {
+				recorded = true
+			}
+		}
+	}
+	if !recorded {
+		t.Error("the journal entry does not record the peer application")
+	}
+}
+
+// A roam must refuse an interface NostMesh does not own, exactly as every other
+// network change does. Roaming is not an exception to that rule.
+func TestRoamingRefusesForeignInterface(t *testing.T) {
+	manager, controller, _ := newTestManagerWithJournal(t)
+	peer := nostrIdentity(t, 1)
+
+	// An interface whose name is not ours: observed, but not owned.
+	controller.PreexistingInterface("eth0", nil)
+	establishedSession(t, manager, peer)
+
+	err := manager.Roam(context.Background(), peer, verifiedCandidate("203.0.113.50:51820"), "eth0")
+	if err == nil {
+		t.Fatal("roaming onto a foreign interface must be refused")
 	}
 }
 
