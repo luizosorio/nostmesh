@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"time"
@@ -154,39 +151,25 @@ func throwawayIdentity() (domain.NostrPrivateKey, domain.NostrPublicKey, error) 
 // relay refusing it would say nothing about whether it accepts the kind. An
 // unsigned event is rejected by every relay for the same reason, which would
 // make the check measure nothing.
+//
+// It carries the same tags a real control message carries, including the d tag
+// the experimental kind requires: a relay may treat a parameterized-replaceable
+// event without one differently, and a check that omitted it would not be
+// checking what this protocol actually publishes.
 func probeEvent(private domain.NostrPrivateKey, public domain.NostrPublicKey) ([]byte, error) {
-	createdAt := time.Now().Unix()
-	content := "nostmesh relay check"
-
-	// NIP-01 defines the id as the SHA-256 of a specific serialization:
-	// [0, pubkey, created_at, kind, tags, content]. Anything else produces an
-	// id no relay accepts.
-	serialized, err := json.Marshal([]any{
-		0, public.String(), createdAt, protocol.ExperimentalKind, []any{}, content,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("serializing event: %w", err)
-	}
-
-	digest := sha256.Sum256(serialized)
-
 	signer, err := nostr.NewSigner(private)
 	if err != nil {
 		return nil, fmt.Errorf("building signer: %w", err)
 	}
 
-	signature, err := signer.Sign(digest[:])
-	if err != nil {
-		return nil, fmt.Errorf("signing event: %w", err)
+	tags := [][]string{
+		nostr.RecipientTag(public),
+		nostr.ReplaceableTag("relay-check", string(protocol.TypeSessionRequest), 1),
 	}
 
-	return json.Marshal(map[string]any{
-		"id":         hex.EncodeToString(digest[:]),
-		"pubkey":     public.String(),
-		"created_at": createdAt,
-		"kind":       protocol.ExperimentalKind,
-		"tags":       []any{},
-		"content":    content,
-		"sig":        hex.EncodeToString(signature),
-	})
+	_, raw, err := nostr.BuildEvent(signer, protocol.ExperimentalKind, tags, "nostmesh relay check", time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }

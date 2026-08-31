@@ -10,6 +10,7 @@ package e2e
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"sync"
@@ -341,7 +342,29 @@ func (h *Harness) publish(ctx context.Context, from, to *Node,
 		return fmt.Errorf("sealing: %w", err)
 	}
 
-	raw := []byte(sealed.Body)
+	// The event content is the whole envelope, not just the ciphertext. The
+	// cleartext fields are what the receiver recomputes into the context hash,
+	// so publishing the body alone would leave the receiver unable to open it.
+	content, err := json.Marshal(sealed)
+	if err != nil {
+		return fmt.Errorf("encoding envelope: %w", err)
+	}
+
+	signer, err := nostr.NewSigner(from.Private)
+	if err != nil {
+		return fmt.Errorf("building signer: %w", err)
+	}
+
+	tags := [][]string{
+		nostr.RecipientTag(to.Public),
+		nostr.ReplaceableTag(sealed.SessionID, string(sealed.Type), sealed.Seq),
+	}
+
+	_, raw, err := nostr.BuildEvent(signer, protocol.ExperimentalKind, tags, string(content), now)
+	if err != nil {
+		return fmt.Errorf("building event: %w", err)
+	}
+
 	if _, err := from.Client.Publish(ctx, sealed.MessageID, raw); err != nil {
 		return err
 	}
