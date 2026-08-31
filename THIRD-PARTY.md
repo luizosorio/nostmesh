@@ -21,6 +21,7 @@
 | `github.com/pion/transport` | v4.0.0 | MIT |
 | `github.com/wlynxg/anet` | v0.0.5 | BSD-3-Clause |
 | `github.com/pion/dtls` | v3.0.7 | MIT | *(test dependency of `pion/stun`; not imported, does not reach the binary)* |
+| `github.com/coder/websocket` | v1.8.12 | ISC |
 
 - `golang.org/x/crypto` supplies Curve25519, used to derive WireGuard public
   keys.
@@ -36,6 +37,10 @@
   test fails the build if anything imports it.
 - `btcd/btcec` and `dcrd/secp256k1` provide secp256k1 and Schnorr signatures.
 
+- `coder/websocket` carries the relay connection. It brings no transitive
+  dependencies of its own, and was already in the graph as a `go-nostr`
+  dependency (NM-14). The Nostr protocol layer above it — framing, subscriptions,
+  deduplication, outbox — is this project's own.
 - `pion/stun` provides the STUN wire format for discovering this node's
   observed address. The connectivity check that validates a candidate is
   NostMesh's own (NM-13), authenticated with session key material rather than
