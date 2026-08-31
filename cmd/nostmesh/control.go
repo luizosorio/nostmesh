@@ -13,6 +13,7 @@ import (
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/nostr"
+	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 )
 
@@ -35,11 +36,10 @@ type controlPlane struct {
 	// inbound carries what the relay subscription delivered, already opened.
 	inbound <-chan nostr.Received
 
-	mu               sync.Mutex
-	rejected         int
-	reasons          []string
-	published        []publication
-	sessionCreatedAt time.Time
+	mu        sync.Mutex
+	rejected  int
+	reasons   []string
+	published []publication
 }
 
 // publication records how one outgoing message fared across the relay set.
@@ -94,13 +94,23 @@ func (c *controlPlane) Publish(ctx context.Context, kind protocol.MessageType,
 		return fmt.Errorf("generating message id: %w", err)
 	}
 
+	c.mu.Lock()
+	session := c.sessions
+	c.mu.Unlock()
+
+	if session == "" {
+		// Publishing before the conversation has a session would name none, and
+		// the peer discards a message that belongs to no conversation.
+		return fmt.Errorf("cannot publish %s: this conversation has no session yet", kind)
+	}
+
 	now := c.clock()
 	envelope := protocol.Envelope{
 		Version:   protocol.Version,
 		Namespace: protocol.Namespace,
 		Type:      kind,
 		MessageID: hex.EncodeToString(messageID),
-		SessionID: c.Session(),
+		SessionID: session,
 		Seq:       seq,
 		CreatedAt: now.Unix(),
 		ExpiresAt: now.Add(envelopeLifetime).Unix(),
@@ -192,7 +202,7 @@ func (c *controlPlane) Publications() []string {
 // sealed for this conversation. A message failing either is discarded, since a
 // relay carrying other people's traffic is ordinary — but the reason is kept, so
 // a wait that ends empty can say what it saw instead of only that it waited.
-func (c *controlPlane) Next(ctx context.Context) (protocol.MessageType, uint64, protocol.Payload, error) {
+func (c *controlPlane) Next(ctx context.Context) (orchestrator.Delivery, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -200,14 +210,14 @@ func (c *controlPlane) Next(ctx context.Context) (protocol.MessageType, uint64, 
 			// a wait times out: "no offer arrived" says nothing, while "4
 			// messages arrived and every one failed to decrypt" names the
 			// problem.
-			return "", 0, protocol.Payload{}, c.explainTimeout(ctx.Err())
+			return orchestrator.Delivery{}, c.explainTimeout(ctx.Err())
 
 		case received, open := <-c.inbound:
 			if !open {
-				return "", 0, protocol.Payload{}, errors.New("control plane closed")
+				return orchestrator.Delivery{}, errors.New("control plane closed")
 			}
 
-			kind, seq, payload, err := c.open(received)
+			delivery, err := c.open(received)
 			if err != nil {
 				// A rejected message is not fatal — relays carry other
 				// people's traffic, and a message for another session or
@@ -218,48 +228,48 @@ func (c *controlPlane) Next(ctx context.Context) (protocol.MessageType, uint64, 
 				c.recordRejection(err)
 				continue
 			}
-			return kind, seq, payload, nil
+			return delivery, nil
 		}
 	}
 }
 
 // open verifies and decrypts one delivered event.
-func (c *controlPlane) open(received nostr.Received) (protocol.MessageType, uint64, protocol.Payload, error) {
+func (c *controlPlane) open(received nostr.Received) (orchestrator.Delivery, error) {
 	event, err := nostr.ParseEvent(received.Event.Raw)
 	if err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	// The signature is checked before anything else is believed about the
 	// event. A relay can deliver whatever it likes; only this establishes
 	// authorship.
 	if err := nostr.VerifyEvent(event); err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	// An event signed by someone other than the peer is not part of this
 	// conversation, whatever it claims inside.
 	if event.PublicKey != c.peer.String() {
-		return "", 0, protocol.Payload{}, errors.New("event is not from the expected peer")
+		return orchestrator.Delivery{}, errors.New("event is not from the expected peer")
 	}
 
 	var envelope protocol.Envelope
 	if err := json.Unmarshal([]byte(event.Content), &envelope); err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	// Version, namespace, size, expiry and recipient, all checked before the
 	// payload is decrypted: validation is cheapest-first so a malformed message
 	// cannot make this node spend cryptography on it.
 	if err := protocol.ValidateEnvelope(envelope, c.self.String(), c.clock()); err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	// The envelope's claimed sender must match the key that actually signed
 	// the event. Without this the cleartext fields could name anyone, and the
 	// signature would still verify against its true author.
 	if envelope.Sender != event.PublicKey {
-		return "", 0, protocol.Payload{}, errors.New("envelope sender does not match the signing key")
+		return orchestrator.Delivery{}, errors.New("envelope sender does not match the signing key")
 	}
 
 	// A relay stores events and replays them to a new subscription, so a
@@ -270,66 +280,59 @@ func (c *controlPlane) open(received nostr.Received) (protocol.MessageType, uint
 	// carries a different offer hash, and accepting it produces a mismatch the
 	// far side reports as tampering. The session id is what tells them apart.
 	if err := c.matchesSession(envelope); err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	payload, err := c.codec.Open(envelope, c.key)
 	if err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
 	if err := protocol.ValidatePayload(payload, envelope, c.clock()); err != nil {
-		return "", 0, protocol.Payload{}, err
+		return orchestrator.Delivery{}, err
 	}
 
-	return envelope.Type, envelope.Seq, payload, nil
+	return orchestrator.Delivery{
+		Kind:      envelope.Type,
+		Seq:       envelope.Seq,
+		Payload:   payload,
+		SessionID: envelope.SessionID,
+		CreatedAt: envelope.CreatedTime(),
+	}, nil
 }
 
 // BindSession names the session this conversation belongs to.
 //
-// An empty id makes the conversation adopt the first session it sees, which is
-// what a responder needs: it learns the session from the request it answers.
+// An empty id is refused. "Not yet bound" is this plane's initial state, not a
+// request a caller makes: accepting one would publish messages naming no
+// session, which the peer discards as belonging to a different conversation.
 func (c *controlPlane) BindSession(sessionID string) error {
+	if sessionID == "" {
+		return errors.New("a session identifier is required; an unbound plane is its initial state, not a request")
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.sessions = sessionID
-	if sessionID == "" {
-		c.sessionCreatedAt = time.Time{}
-	}
 	return nil
 }
 
-// Session reports the session this conversation settled on.
-func (c *controlPlane) Session() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.sessions
-}
-
-// SessionCreatedAt reports when the message that named this session was
-// published, as its sender stamped it.
-func (c *controlPlane) SessionCreatedAt() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.sessionCreatedAt
-}
-
-// matchesSession keeps a conversation to a single session.
+// matchesSession keeps a bound conversation to its single session.
 //
-// The initiator knows its session id from the start. The responder learns it
-// from the request that opens the session, so it adopts the first one it
-// accepts and refuses every other afterwards — which is what stops a relay's
-// replay of an older session from being answered as though it were current.
+// While unbound the message is accepted and its session reported upward: a
+// responder sees several requests before choosing one, and adopting here would
+// bind the conversation to whichever the relay replayed first, before the driver
+// had seen the alternatives. Choosing is the driver's decision, and this plane
+// has none of the information it needs to make it.
+//
+// Once bound, a message from any other session is refused — which is what stops
+// a relay's replay of an older session from being answered as though current.
 func (c *controlPlane) matchesSession(envelope protocol.Envelope) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.sessions == "" {
-		c.sessions = envelope.SessionID
-		c.sessionCreatedAt = envelope.CreatedTime()
 		return nil
 	}
 	if envelope.SessionID != c.sessions {

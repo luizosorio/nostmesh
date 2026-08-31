@@ -65,65 +65,67 @@ func (s *stubTransport) isClosed() bool {
 
 // stubPublisher records what the driver sent.
 type stubPublisher struct {
-	mu        sync.Mutex
-	sent      []protocol.MessageType
-	session   string
-	sessionAt time.Time
+	mu      sync.Mutex
+	sent    []sentMessage
+	session string
+}
+
+// sentMessage records a publication and the session it named, which is the only
+// way to tell an offer that names the answered session from one that names
+// nothing.
+type sentMessage struct {
+	kind    protocol.MessageType
+	session string
 }
 
 func (p *stubPublisher) Publish(_ context.Context, kind protocol.MessageType, _ uint64, _ protocol.Payload) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.sent = append(p.sent, kind)
+
+	// The session is captured at publication time, exactly as the real plane
+	// stamps it into the envelope. A stub that ignored it could not tell a
+	// message naming no session from a correct one.
+	p.sent = append(p.sent, sentMessage{kind: kind, session: p.session})
 	return nil
 }
 
+// BindSession mirrors the real transport: an empty id is refused, because "not
+// yet bound" is an initial state rather than something a caller asks for.
 func (p *stubPublisher) BindSession(sessionID string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// An empty id clears the session, exactly as the real transport does: it
-	// means "adopt whatever arrives next", not "invent one". A stub that
-	// fabricated a session here would report one bound even when the driver
-	// left it unbound, and the test asserting otherwise would pass against a
-	// bug that breaks every real session.
-	p.session = sessionID
 	if sessionID == "" {
-		p.sessionAt = time.Time{}
+		return errors.New("a session identifier is required")
 	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.session = sessionID
 	return nil
-}
-
-// adopt is how the stub learns a session from an arriving message, mirroring
-// the control plane's behaviour when it opens a request.
-func (p *stubPublisher) adopt(sessionID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.session == "" {
-		p.session = sessionID
-		p.sessionAt = testFixedNow
-	}
-}
-
-func (p *stubPublisher) Session() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.session
-}
-
-func (p *stubPublisher) SessionCreatedAt() time.Time {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.sessionAt
 }
 
 func (p *stubPublisher) types() []protocol.MessageType {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]protocol.MessageType, len(p.sent))
-	copy(out, p.sent)
+
+	out := make([]protocol.MessageType, 0, len(p.sent))
+	for _, sent := range p.sent {
+		out = append(out, sent.kind)
+	}
 	return out
+}
+
+// sessionOf reports the session a published message named, and whether it was
+// published at all.
+func (p *stubPublisher) sessionOf(kind protocol.MessageType) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, sent := range p.sent {
+		if sent.kind == kind {
+			return sent.session, true
+		}
+	}
+	return "", false
 }
 
 // stubReceiver replays a scripted sequence of peer messages.
@@ -131,10 +133,6 @@ type stubReceiver struct {
 	mu       sync.Mutex
 	messages []scriptedMessage
 	index    int
-
-	// publisher is notified of each message's session, the way the real control
-	// plane adopts a session as it opens an incoming envelope.
-	publisher *stubPublisher
 }
 
 type scriptedMessage struct {
@@ -145,9 +143,12 @@ type scriptedMessage struct {
 	// session names the conversation the message belongs to, as the envelope
 	// would.
 	session string
+
+	// createdAt is when the sender stamped it.
+	createdAt time.Time
 }
 
-func (r *stubReceiver) Next(ctx context.Context) (protocol.MessageType, uint64, protocol.Payload, error) {
+func (r *stubReceiver) Next(ctx context.Context) (Delivery, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -155,16 +156,19 @@ func (r *stubReceiver) Next(ctx context.Context) (protocol.MessageType, uint64, 
 		// Nothing left: behave like a peer that went silent rather than
 		// returning a message the script does not contain.
 		<-ctx.Done()
-		return "", 0, protocol.Payload{}, ctx.Err()
+		return Delivery{}, ctx.Err()
 	}
 
 	message := r.messages[r.index]
 	r.index++
 
-	if r.publisher != nil {
-		r.publisher.adopt(message.session)
-	}
-	return message.kind, message.seq, message.payload, nil
+	return Delivery{
+		Kind:      message.kind,
+		Seq:       message.seq,
+		Payload:   message.payload,
+		SessionID: message.session,
+		CreatedAt: message.createdAt,
+	}, nil
 }
 
 func newDriverFixture(t *testing.T, authorized bool) (*Driver, *wireguard.FakeController, *stubTransport, *stubPublisher, domain.NostrPublicKey) {
@@ -517,17 +521,17 @@ func TestOutOfOrderMessagesAreNotLost(t *testing.T) {
 	defer cancel()
 
 	// The offer is consumed while the candidate update is held.
-	if _, _, err := driver.awaitMessage(ctx, protocol.TypeSessionOffer); err != nil {
+	if _, err := driver.awaitMessage(ctx, protocol.TypeSessionOffer); err != nil {
 		t.Fatalf("waiting for the offer: %v", err)
 	}
 
 	// The receiver is exhausted now, so the candidate update can only come from
 	// what was held.
-	payload, _, err := driver.awaitMessage(ctx, protocol.TypeCandidateUpdate)
+	delivery, err := driver.awaitMessage(ctx, protocol.TypeCandidateUpdate)
 	if err != nil {
 		t.Fatalf("the early candidate update was lost: %v", err)
 	}
-	if payload.Candidate == nil || len(payload.Candidate.Added) != 1 {
+	if delivery.Payload.Candidate == nil || len(delivery.Payload.Candidate.Added) != 1 {
 		t.Error("the held message did not survive intact")
 	}
 }
@@ -546,7 +550,7 @@ func TestHeldMessagesAreBounded(t *testing.T) {
 	defer cancel()
 
 	// Waiting for a type that never arrives drains the flood into the buffer.
-	_, _, _ = driver.awaitMessage(ctx, protocol.TypeSessionReady)
+	_, _ = driver.awaitMessage(ctx, protocol.TypeSessionReady)
 
 	driver.pendingMu.Lock()
 	held := len(driver.pending[protocol.TypeCandidateUpdate])
@@ -557,38 +561,37 @@ func TestHeldMessagesAreBounded(t *testing.T) {
 	}
 }
 
-// A responder reads requests with the transport reset to "adopt what arrives",
-// so it can learn each candidate request's session. The reset must not survive a
-// read that finds nothing: the loop keeps looking for a newer request, times
-// out, and the session it had already settled on is gone. Its offer then goes
-// out naming no session, the initiator discards it as belonging to a different
-// conversation, and both sides wait out their timeouts.
+// The offer a responder publishes must name the session of the request it
+// answered. An offer naming nothing is discarded by the initiator as belonging
+// to a different conversation, and both sides then wait out their timeouts.
 //
 // Observed against a real relay, where the offer carried an empty session id.
-func TestResponderKeepsTheSessionAfterAFruitlessRead(t *testing.T) {
-	driver, _, _, publisher, _ := newDriverFixture(t, true)
+// This assertion is on the published message rather than on transport state,
+// because three earlier versions asserting the latter passed against the bug:
+// the stub held the same field the implementation held, so it answered from its
+// own bookkeeping instead of from what was sent.
+func TestTheOfferNamesTheAnsweredSession(t *testing.T) {
+	driver, _, _, publisher, peer := newDriverFixture(t, true)
 
-	// One request, then silence — which is what the selection loop sees when a
-	// relay has nothing newer to offer.
-	driver.receiver = &stubReceiver{
-		messages:  []scriptedMessage{requestMessage(t)},
-		publisher: publisher,
-	}
+	request := requestMessage(t)
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{request}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	request, err := driver.awaitRequest(ctx)
-	if err != nil {
-		t.Fatalf("awaiting the request: %v", err)
-	}
+	// Run the responder far enough to publish its offer. It will fail later
+	// waiting for an accept that never comes, which is not what is under test.
+	_ = driver.Connect(ctx, peer, RoleResponder)
 
-	bound := publisher.Session()
-	if bound == "" {
-		t.Fatal("the responder left no session bound; its offer would name none")
+	named, published := publisher.sessionOf(protocol.TypeSessionOffer)
+	if !published {
+		t.Fatal("the responder never published an offer")
 	}
-	if bound != request.sessionID.String() {
-		t.Errorf("bound session %s, answering %s", bound, request.sessionID)
+	if named == "" {
+		t.Fatal("the offer named no session; the initiator discards it as belonging to another conversation")
+	}
+	if named != request.session {
+		t.Errorf("the offer names session %s, the request it answered was %s", named, request.session)
 	}
 }
 
@@ -599,10 +602,7 @@ func TestResponderDoesNotAnswerASessionTwice(t *testing.T) {
 	driver, _, _, _, _ := newDriverFixture(t, true)
 
 	first := requestMessage(t)
-	driver.receiver = &stubReceiver{
-		messages:  []scriptedMessage{first},
-		publisher: driver.publisher.(*stubPublisher),
-	}
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{first}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -612,9 +612,39 @@ func TestResponderDoesNotAnswerASessionTwice(t *testing.T) {
 		t.Fatalf("awaiting the first request: %v", err)
 	}
 
-	// The same session offered again must be passed over.
 	if !driver.alreadyTried(answered.sessionID) {
 		t.Error("a session that was already answered must be remembered")
+	}
+}
+
+// Given several requests, the responder answers the newest it has not already
+// tried. A relay replays its backlog before any live traffic, so the first to
+// arrive is routinely the stale one.
+func TestResponderAnswersTheNewestUntriedRequest(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	stale := requestMessage(t)
+	stale.session = strings.Repeat("11", 32)
+	stale.createdAt = testFixedNow.Add(-10 * time.Minute)
+
+	live := requestMessage(t)
+	live.session = strings.Repeat("22", 32)
+	live.createdAt = testFixedNow
+
+	// The stale one arrives first, as a replayed backlog does.
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{stale, live}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	chosen, err := driver.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("awaiting a request: %v", err)
+	}
+
+	if chosen.sessionID.String() != live.session {
+		t.Errorf("answered session %s, expected the newest one %s",
+			chosen.sessionID.String()[:8], live.session[:8])
 	}
 }
 
@@ -633,9 +663,10 @@ func requestMessage(t *testing.T) scriptedMessage {
 	}
 
 	return scriptedMessage{
-		kind:    protocol.TypeSessionRequest,
-		seq:     0,
-		session: strings.Repeat("ab", 32),
+		kind:      protocol.TypeSessionRequest,
+		seq:       0,
+		session:   strings.Repeat("ab", 32),
+		createdAt: testFixedNow,
 		payload: protocol.Payload{
 			Request: &protocol.SessionRequest{
 				TunnelKey: protocol.TunnelKey{
