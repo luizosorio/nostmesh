@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
+	github.com/coder/websocket v1.8.12
 	github.com/nbd-wtf/go-nostr v0.52.3
 	github.com/pion/stun/v3 v3.1.7
 	github.com/vishvananda/netlink v1.3.1

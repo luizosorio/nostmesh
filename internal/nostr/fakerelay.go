@@ -174,6 +174,13 @@ func (r *FakeRelay) Publish(ctx context.Context, id string, raw []byte) error {
 		return nil
 	}
 
+	// A real relay answers with the event's own id, so the fake does too:
+	// echoing the caller's id would let a client that matches on the wrong one
+	// pass here and fail against every real relay.
+	if embedded, err := eventIDOf(raw); err == nil {
+		id = embedded
+	}
+
 	event := PublishedEvent{ID: id, Raw: raw, Relay: r.url, At: r.clock()}
 	r.published = append(r.published, event)
 
