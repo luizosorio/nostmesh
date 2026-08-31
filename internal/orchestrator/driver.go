@@ -660,26 +660,40 @@ func (d *Driver) settle(request *pendingRequest) (*pendingRequest, error) {
 	if err := d.publisher.BindSession(request.sessionID.String()); err != nil {
 		return nil, err
 	}
+
+	// Recorded here, where the responder commits, rather than where it was
+	// merely considered.
+	d.recordAttempt(request.sessionID)
 	return request, nil
 }
 
 // alreadyTried reports whether this responder has already answered a session.
 //
-// A relay hands back stored requests on every poll, so without this the
-// responder answers the same abandoned session indefinitely, never reaching the
-// live one behind it.
+// Asking is separate from recording, and the separation is the point. A relay
+// hands stored requests back on every poll, so a session that was answered must
+// not be answered again — but one that was merely considered and passed over
+// must stay available. Marking on selection loses exactly the case that matters:
+// the responder picks a stale request, the attempt fails, and the session it
+// should have answered has been struck off by the act of looking at it.
 func (d *Driver) alreadyTried(sessionID domain.SessionID) bool {
+	d.pendingMu.Lock()
+	defer d.pendingMu.Unlock()
+
+	return d.tried[sessionID]
+}
+
+// recordAttempt marks a session as answered.
+//
+// Called once the responder commits to a request, not while it is still
+// choosing among them.
+func (d *Driver) recordAttempt(sessionID domain.SessionID) {
 	d.pendingMu.Lock()
 	defer d.pendingMu.Unlock()
 
 	if d.tried == nil {
 		d.tried = make(map[domain.SessionID]bool)
 	}
-	if d.tried[sessionID] {
-		return true
-	}
 	d.tried[sessionID] = true
-	return false
 }
 
 // readRequest waits for one request and reports the session it named.

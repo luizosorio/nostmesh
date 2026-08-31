@@ -613,7 +613,53 @@ func TestResponderDoesNotAnswerASessionTwice(t *testing.T) {
 	}
 
 	if !driver.alreadyTried(answered.sessionID) {
-		t.Error("a session that was already answered must be remembered")
+		t.Error("a session that was answered must be remembered")
+	}
+}
+
+// Considering a request and passing it over must not strike its session off.
+//
+// The responder examines several requests before committing to one. If merely
+// looking marked them, a session it declined this time — because a newer one
+// superseded it, or because the attempt failed — could never be answered later,
+// and the responder would sit idle with a live request in front of it.
+//
+// Measured against real relays: the responder settled on a request from the
+// previous run, that attempt failed, and the current request was already struck
+// off by the act of comparing the two.
+func TestConsideringARequestDoesNotStrikeOffItsSession(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	older := requestMessage(t)
+	older.session = strings.Repeat("44", 32)
+	older.createdAt = testFixedNow.Add(-time.Second)
+
+	newer := requestMessage(t)
+	newer.session = strings.Repeat("55", 32)
+	newer.createdAt = testFixedNow
+
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{older, newer}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	chosen, err := driver.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("awaiting a request: %v", err)
+	}
+	if chosen.sessionID.String() != newer.session {
+		t.Fatalf("answered %s, expected the newer %s", chosen.sessionID.String()[:8], newer.session[:8])
+	}
+
+	// The one that lost the comparison was never answered, so it must remain
+	// available: the peer may retry it, and a responder that had struck it off
+	// would ignore a request it is perfectly able to serve.
+	loser, err := domain.ParseSessionID(older.session)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if driver.alreadyTried(loser) {
+		t.Error("a request that was considered and passed over was struck off; the peer could never retry it")
 	}
 }
 

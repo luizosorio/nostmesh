@@ -242,6 +242,9 @@ func (c *controlPlane) Next(ctx context.Context) (orchestrator.Delivery, error) 
 
 			delivery, err := c.open(received)
 			if err != nil {
+				if c.trace != nil {
+					c.trace(fmt.Sprintf("refused a message: %v", err))
+				}
 				// A rejected message is not fatal — relays carry other
 				// people's traffic, and a message for another session or
 				// another node is ordinary. But discarding silently is how a
