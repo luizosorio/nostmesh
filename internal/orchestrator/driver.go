@@ -543,46 +543,39 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	// both sides wait out their timeouts having exchanged messages that could
 	// never match.
 	//
-	// Timestamps cannot settle this on their own. The tolerance a healthy pair
-	// of hosts needs for clock skew is minutes, and the age difference between
-	// a live request and an abandoned one is often seconds, so any threshold
-	// wide enough to be safe is also wide enough to admit the stale one.
+	// The rule is that a responder answers requests addressed to it while it was
+	// listening, not requests it finds lying around.
 	//
-	// What does separate them is the session. A responder takes the newest
-	// request it sees within a short window after the first one arrives, and
-	// having answered a session, never adopts it again: an initiator that is
-	// still running republishes, so its request comes back, while an abandoned
-	// one does not.
-	// The deadline comes from the system clock, not the injected one. This
-	// window bounds a wait on a real socket, and a context compares against the
-	// system clock: an injected clock set anywhere else makes the window expire
-	// instantly or never, and the loop then answers the first request it sees —
-	// which is the stale one a relay replays first.
-	deadline := time.Now().Add(requestSelectionWindow)
+	// A window in which a newer request supersedes an older one does not work:
+	// the stale one arrives instantly from the relay's store while the live one
+	// is published seconds later, by which time any window short enough to be
+	// useful has closed. Measured against real relays, the responder answered a
+	// session from a run minutes earlier while the initiator was running a
+	// different one, and both waited out their timeouts.
+	//
+	// The tolerance is the protocol's own: the initiator stamped this with its
+	// clock, and two healthy hosts disagree by up to that much.
+	notBefore := d.clock.Now().Add(-protocol.MaxClockSkew)
 
-	var newest *pendingRequest
 	for {
-		remaining := time.Until(deadline)
-		if newest != nil && remaining <= 0 {
-			return d.settle(newest)
-		}
-
-		request, err := d.readWithin(ctx, newest != nil, remaining)
+		request, err := d.readRequest(ctx)
 		if err != nil {
-			if newest != nil {
-				// The window closed with something in hand, which is the
-				// expected end rather than a failure.
-				return d.settle(newest)
-			}
 			return nil, err
 		}
 
+		// Already answered: a relay hands stored requests back on every poll,
+		// so without this the same abandoned session is answered forever.
 		if d.alreadyTried(request.sessionID) {
 			continue
 		}
-		if newest == nil || request.createdAt.After(newest.createdAt) {
-			newest = request
+
+		// Published before this node began listening, so it belongs to a
+		// conversation this node was not part of.
+		if request.createdAt.Before(notBefore) {
+			continue
 		}
+
+		return d.settle(request)
 	}
 }
 
@@ -597,22 +590,6 @@ func (d *Driver) settle(request *pendingRequest) (*pendingRequest, error) {
 		return nil, err
 	}
 	return request, nil
-}
-
-// readWithin reads a request, bounded by the selection window once one is held.
-//
-// Before anything has arrived the wait is unbounded, because a responder may
-// legitimately sit idle for as long as the operator allows. Once a request is in
-// hand the wait is short: it is only looking for a newer one to supersede it.
-func (d *Driver) readWithin(ctx context.Context, bounded bool, remaining time.Duration) (*pendingRequest, error) {
-	if !bounded {
-		return d.readRequest(ctx)
-	}
-
-	window, cancel := context.WithTimeout(ctx, remaining)
-	defer cancel()
-
-	return d.readRequest(window)
 }
 
 // alreadyTried reports whether this responder has already answered a session.
@@ -633,14 +610,6 @@ func (d *Driver) alreadyTried(sessionID domain.SessionID) bool {
 	d.tried[sessionID] = true
 	return false
 }
-
-// requestSelectionWindow is how long a responder collects requests before
-// answering the newest.
-//
-// It starts when the responder begins waiting, not when the first request
-// arrives, so a relay replaying its backlog and a live request published moments
-// later are weighed against each other rather than raced.
-const requestSelectionWindow = 5 * time.Second
 
 // readRequest waits for one request and reports the session it named.
 //

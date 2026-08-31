@@ -617,15 +617,24 @@ func TestResponderDoesNotAnswerASessionTwice(t *testing.T) {
 	}
 }
 
-// Given several requests, the responder answers the newest it has not already
-// tried. A relay replays its backlog before any live traffic, so the first to
-// arrive is routinely the stale one.
-func TestResponderAnswersTheNewestUntriedRequest(t *testing.T) {
+// A responder answers requests addressed to it while it was listening, not
+// requests it finds lying around. A relay replays its stored backlog before any
+// live traffic, so the first request to arrive is routinely one the initiator
+// abandoned minutes ago.
+//
+// Answering it strands both sides: the offer names a session the initiator is no
+// longer running, and each waits out its timeout. Measured against real relays,
+// where a responder answered a session from an earlier run while the initiator
+// was on a new one.
+func TestResponderIgnoresRequestsPublishedBeforeItListened(t *testing.T) {
 	driver, _, _, _, _ := newDriverFixture(t, true)
 
+	// Old enough to sit outside the clock-skew tolerance, which is what
+	// separates "published before I started" from "published just now by a host
+	// whose clock disagrees with mine".
 	stale := requestMessage(t)
 	stale.session = strings.Repeat("11", 32)
-	stale.createdAt = testFixedNow.Add(-10 * time.Minute)
+	stale.createdAt = testFixedNow.Add(-protocol.MaxClockSkew - time.Minute)
 
 	live := requestMessage(t)
 	live.session = strings.Repeat("22", 32)
@@ -643,8 +652,32 @@ func TestResponderAnswersTheNewestUntriedRequest(t *testing.T) {
 	}
 
 	if chosen.sessionID.String() != live.session {
-		t.Errorf("answered session %s, expected the newest one %s",
+		t.Errorf("answered session %s, expected the live one %s",
 			chosen.sessionID.String()[:8], live.session[:8])
+	}
+}
+
+// A request from a peer whose clock runs behind must still be answered. The
+// tolerance that admits it is the same one the protocol applies to every other
+// timestamp, so a message this accepts is one the validator would accept too.
+func TestResponderAnswersAPeerWhoseClockIsBehind(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	skewed := requestMessage(t)
+	skewed.session = strings.Repeat("33", 32)
+	skewed.createdAt = testFixedNow.Add(-protocol.MaxClockSkew + time.Minute)
+
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{skewed}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	chosen, err := driver.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("a peer running behind must still be answered: %v", err)
+	}
+	if chosen.sessionID.String() != skewed.session {
+		t.Errorf("answered %s, expected %s", chosen.sessionID.String()[:8], skewed.session[:8])
 	}
 }
 
