@@ -10,6 +10,7 @@ import (
 
 	"github.com/luizosorio/nostmesh/internal/connectivity"
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/session"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
@@ -119,13 +120,24 @@ type SessionManager struct {
 	controller wireguard.Controller
 	clock      domain.Clock
 
+	// netstate applies network changes transactionally. Roaming rewrites a live
+	// peer's endpoint, which is a network change like any other and therefore
+	// goes through the journal rather than straight to the controller.
+	netstate *netstate.Manager
+
 	// maxSessions bounds concurrent sessions, since each holds kernel state.
 	maxSessions int
 }
 
 // SessionManagerOptions configures a SessionManager.
 type SessionManagerOptions struct {
-	Controller  wireguard.Controller
+	Controller wireguard.Controller
+
+	// NetState applies roaming changes transactionally. Required: without it a
+	// roam would write to the kernel outside the journal, leaving a change that
+	// cannot be attributed or reversed.
+	NetState *netstate.Manager
+
 	Clock       domain.Clock
 	MaxSessions int
 }
@@ -146,6 +158,7 @@ func NewSessionManager(opts SessionManagerOptions) (*SessionManager, error) {
 		sessions:    make(map[domain.NostrPublicKey]*SessionState),
 		handshakes:  make(map[domain.NostrPublicKey]*session.Handshake),
 		controller:  opts.Controller,
+		netstate:    opts.NetState,
 		clock:       opts.Clock,
 		maxSessions: opts.MaxSessions,
 	}, nil
@@ -173,6 +186,28 @@ func (m *SessionManager) Begin(peer domain.NostrPublicKey, sessionID domain.Sess
 
 	snapshot := *state
 	return &snapshot, nil
+}
+
+// trackHandshake associates protocol state with a session.
+//
+// The manager holds it so that a message arriving for a session can be routed
+// to the handshake that expects it, and so a session torn down releases its
+// protocol state with everything else.
+func (m *SessionManager) trackHandshake(peer domain.NostrPublicKey, handshake *session.Handshake) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.handshakes[peer] = handshake
+}
+
+// Handshake returns the protocol state for a session, if it is still
+// negotiating.
+func (m *SessionManager) Handshake(peer domain.NostrPublicKey) (*session.Handshake, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	handshake, known := m.handshakes[peer]
+	return handshake, known
 }
 
 // AdvancePhase records progress.
@@ -264,8 +299,14 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 	// The kernel is updated with the same peer key at a new address. The
 	// AllowedIPs are untouched: they come from local policy, and a peer moving
 	// does not change what it is allowed to send.
+	//
+	// This goes through the journal rather than straight to the controller. A
+	// roam is a network change like any other, and the invariant is that every
+	// one of them is transactional, attributable and reversible — a direct
+	// write would leave an endpoint no rollback could undo and no audit could
+	// explain.
 	endpoint := candidate.Address
-	if err := m.controller.ApplyPeer(ctx, iface, wireguard.PeerSpec{
+	if err := m.applyRoam(ctx, iface, wireguard.PeerSpec{
 		PublicKey:  tunnelKey,
 		Endpoint:   &endpoint,
 		AllowedIPs: allowed,
@@ -281,6 +322,51 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 	state.LastRoamAt = &now
 	state.RoamCount++
 
+	return nil
+}
+
+// applyRoam rewrites a live peer's endpoint through the journal.
+//
+// The interface is observed rather than reconstructed: the roam changes one
+// peer's endpoint and must not restate anything else about the interface. In
+// particular the private key is never read back from the kernel and is not
+// needed — the interface already exists, and EnsureInterface is idempotent over
+// one that does.
+func (m *SessionManager) applyRoam(ctx context.Context, iface string, peer wireguard.PeerSpec) error {
+	if m.netstate == nil {
+		// Refused rather than silently falling back to a direct write. A roam
+		// that bypassed the journal would leave kernel state that no rollback
+		// could undo, which is exactly the invariant this path exists to keep.
+		return errors.New("roaming requires a transactional network manager")
+	}
+
+	observed, err := m.controller.ObserveInterface(ctx, iface)
+	if err != nil {
+		return fmt.Errorf("observing %s: %w", iface, err)
+	}
+
+	// Refusing to touch an interface that is not ours is the same rule that
+	// governs every other network change; roaming is not an exception to it.
+	if !observed.OwnedByUs {
+		return fmt.Errorf("%w: %s is not owned by nostmesh", ErrRoamingRejected, iface)
+	}
+
+	spec := wireguard.InterfaceSpec{
+		Name:       observed.Name,
+		ListenPort: observed.ListenPort,
+		Addresses:  observed.Addresses,
+		MTU:        observed.MTU,
+	}
+
+	transactionID := fmt.Sprintf("roam-%s-%d", iface, m.clock.Now().UnixNano())
+
+	plan, err := m.netstate.PlanInterface(ctx, transactionID, spec, []wireguard.PeerSpec{peer})
+	if err != nil {
+		return fmt.Errorf("planning roam: %w", err)
+	}
+	if _, err := m.netstate.Apply(ctx, plan); err != nil {
+		return fmt.Errorf("applying roam: %w", err)
+	}
 	return nil
 }
 
