@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-31
+
+**MVP 1 complete.**
+
+Two hosts that know each other's Nostr identity negotiate a session through
+relays, verify a direct UDP path, and establish a WireGuard tunnel. No
+coordinator, and no keys exchanged by hand.
+
+### Proven, not assumed
+
+- **Public relays accept the protocol.** Verified against `nos.lol` and
+  `relay.primal.net`: the experimental kind is accepted with 184–217ms
+  publication latency. This is the first evidence for a hypothesis the project
+  documentation had only stated.
+- 100 of 100 connections succeed in the end-to-end gate, with one relay of three
+  down, with a relay duplicating deliveries, and with a relay accepting and
+  silently discarding.
+- An address supplied by any third party produces no effect until an
+  authenticated challenge/response completes over that exact address and port.
+- A lying observer cannot induce bulk traffic: probes to any single address are
+  bounded, and dangerous targets are refused before a candidate is recorded.
+- The WireGuard private key does not reach an event, a log, the store or a
+  diagnostic — checked across four encodings, a real logging handler, and every
+  formatting verb.
+
+### Known limitations
+
+- **No forward secrecy.** A compromised Nostr private key allows decryption of
+  signalling a relay retained, revealing endpoints, candidates and historical
+  *public* WireGuard keys. No WireGuard private key is ever transmitted.
+- **No relay fallback.** Without a direct path the connection fails; the data
+  relay is MVP 3.
+- **Symmetric NAT on both sides may be impassable.** The failure is clear rather
+  than an endless retry.
+- **No mesh, routes or transit.** MVP 2 and MVP 4.
+- **PCP and NAT-PMP are not implemented**, and report that rather than silently
+  contributing nothing.
+- **Linux only.** The core compiles for Windows and macOS; no adapter exists.
+- **Not audited.** The protocol is experimental and claims no NIP number.
+
+### Verification still outstanding
+
+NAT traversal between two hosts with genuinely different topologies — one with a
+public address, one behind NAT — has not been exercised. The gate runs
+in-process, so real traversal remains unproven.
+
+
 ### Added
 
 - End-to-end testbed: two nodes, three simulated relays, exercising the real
