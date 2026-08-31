@@ -120,15 +120,25 @@ func (o *STUNObserver) readResponse(conn *net.UDPConn, request *stun.Message, se
 		return netip.AddrPort{}, fmt.Errorf("%w: %s: %w", ErrObserverUnreachable, server, err)
 	}
 
+	return parseSTUNResponse(buf[:read], request.TransactionID, server)
+}
+
+// parseSTUNResponse validates a STUN answer and extracts the observed address.
+//
+// It is shared by every observer, whether it owns its socket or borrows one:
+// the checks here are what make a stranger's answer safe to use at all, and an
+// observer that skipped them would let a hostile server inject an address into
+// this node's candidate set.
+func parseSTUNResponse(raw []byte, transaction [stun.TransactionIDSize]byte, server string) (netip.AddrPort, error) {
 	var response stun.Message
-	response.Raw = buf[:read]
+	response.Raw = raw
 	if err := response.Decode(); err != nil {
 		return netip.AddrPort{}, fmt.Errorf("%w: %s: %w", ErrObserverResponse, server, err)
 	}
 
 	// The transaction id ties the answer to this request. Without checking it,
 	// anything that can reach this socket could inject an address.
-	if response.TransactionID != request.TransactionID {
+	if response.TransactionID != transaction {
 		return netip.AddrPort{}, fmt.Errorf("%w: %s: transaction id does not match", ErrObserverResponse, server)
 	}
 
