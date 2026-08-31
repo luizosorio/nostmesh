@@ -368,6 +368,14 @@ func (c *controlPlane) explainTimeout(cause error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Deliveries this node discarded for want of a reader are reported first:
+	// they mean the relay did its job and the loss is local, which is a
+	// different problem from a peer that never published.
+	if dropped := c.set.Dropped(); dropped > 0 {
+		return fmt.Errorf("%w (%d delivery(ies) were discarded because this node was not reading; %d message(s) arrived and none were usable)",
+			cause, dropped, c.rejected)
+	}
+
 	if c.rejected == 0 {
 		return fmt.Errorf("%w (no messages arrived from the peer)", cause)
 	}

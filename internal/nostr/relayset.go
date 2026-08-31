@@ -156,6 +156,19 @@ func (s *RelaySet) Connect(ctx context.Context) error {
 	return nil
 }
 
+// Dropped reports how many deliveries the set discarded for want of a reader.
+//
+// A non-zero count means the relays delivered messages this node then threw
+// away, which looks exactly like the peer never sending them. It belongs in any
+// report of why a wait ended empty.
+func (s *RelaySet) Dropped() int {
+	var total int
+	for _, relay := range s.relays {
+		total += relay.Dropped()
+	}
+	return total
+}
+
 // Connected reports how many relays are currently up.
 func (s *RelaySet) Connected() int {
 	var up int

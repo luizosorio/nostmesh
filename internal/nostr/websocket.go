@@ -52,6 +52,14 @@ type WebSocketRelay struct {
 	// pending maps an event id to the channel awaiting the relay's verdict.
 	pending map[string]chan relayVerdict
 
+	// dropped counts deliveries discarded because a subscriber was not reading.
+	//
+	// A drop is invisible from the outside: the relay sent the event, the client
+	// never saw it, and nothing reports a failure. Counting them is what turns
+	// "the message never arrived" into "the message arrived and we discarded it",
+	// which are different problems with different fixes.
+	dropped int
+
 	clock func() time.Time
 }
 
@@ -359,14 +367,33 @@ func (r *WebSocketRelay) handleEvent(frame []json.RawMessage) {
 	copy(subscribers, r.subscribers)
 	r.mu.Unlock()
 
+	var dropped int
 	for _, subscriber := range subscribers {
 		select {
 		case subscriber <- event:
 		default:
 			// A subscriber that is not reading is skipped rather than blocking
-			// the read loop, which would stall every other subscriber too.
+			// the read loop, which would stall every other subscriber too. The
+			// drop is counted so it can be reported: silently losing an event
+			// the relay did deliver is indistinguishable from never receiving
+			// it, and the two have opposite fixes.
+			dropped++
 		}
 	}
+
+	if dropped > 0 {
+		r.mu.Lock()
+		r.dropped += dropped
+		r.mu.Unlock()
+	}
+}
+
+// Dropped reports how many deliveries this relay discarded for want of a reader.
+func (r *WebSocketRelay) Dropped() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.dropped
 }
 
 // IsConnected reports whether the relay has a live connection.
