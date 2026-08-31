@@ -57,6 +57,39 @@ func TestABoundPlaneRefusesAForeignSession(t *testing.T) {
 	}
 }
 
+// Both halves of the opening exchange must be keyed by recipient, so a later
+// attempt replaces the earlier one on the relay instead of joining it.
+//
+// Getting this wrong for either half strands a session: a responder finds a
+// request from an abandoned attempt, or an initiator finds an offer answering
+// one. Both were measured against real relays.
+func TestBothOpeningMessagesAreKeyedByRecipient(t *testing.T) {
+	opening := map[protocol.MessageType]bool{
+		protocol.TypeSessionRequest: true,
+		protocol.TypeSessionOffer:   true,
+	}
+
+	// Everything after the opening exchange belongs to a session already under
+	// way, where each message is distinct and nothing should replace anything.
+	continuing := []protocol.MessageType{
+		protocol.TypeSessionAccept,
+		protocol.TypeCandidateUpdate,
+		protocol.TypeSessionReady,
+	}
+
+	for kind := range opening {
+		if !opensAConversation(kind) {
+			t.Errorf("%s opens a conversation and must be keyed by recipient, or attempts accumulate on the relay", kind)
+		}
+	}
+
+	for _, kind := range continuing {
+		if opensAConversation(kind) {
+			t.Errorf("%s continues a session and must be keyed by position, or it would replace another message", kind)
+		}
+	}
+}
+
 // Binding to nothing must be refused. "Not yet bound" is the plane's initial
 // state, not a request a caller makes: accepting one would publish messages
 // naming no session, which a peer discards as belonging to no conversation.

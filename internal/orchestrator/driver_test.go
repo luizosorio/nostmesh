@@ -657,6 +657,57 @@ func TestResponderIgnoresRequestsPublishedBeforeItListened(t *testing.T) {
 	}
 }
 
+// An initiator must skip an offer made before it published its request. The
+// mirror of the responder's rule: a relay replays stored offers, so the first to
+// arrive answers a session this node has since abandoned.
+//
+// The handshake would refuse it anyway — the offer hash would not match — but
+// refusing is not enough. The live answer is behind it, and an initiator that
+// stopped at the first offer would time out with its own answer already
+// published.
+func TestInitiatorSkipsAnOfferMadeBeforeItAsked(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	stale := offerMessage(t)
+	stale.createdAt = testFixedNow.Add(-protocol.MaxClockSkew - time.Minute)
+
+	live := offerMessage(t)
+	live.createdAt = testFixedNow
+
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{stale, live}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	offer, err := driver.awaitOffer(ctx, testFixedNow)
+	if err != nil {
+		t.Fatalf("awaiting an offer: %v", err)
+	}
+
+	if !offer.CreatedAt.Equal(live.createdAt) {
+		t.Errorf("took the offer made at %s, expected the one made at %s",
+			offer.CreatedAt.Format(time.TimeOnly), live.createdAt.Format(time.TimeOnly))
+	}
+}
+
+// An offer from a responder whose clock runs behind must still be accepted, or
+// the skew tolerance would be tighter here than the protocol applies elsewhere.
+func TestInitiatorAcceptsAnOfferFromASkewedResponder(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	skewed := offerMessage(t)
+	skewed.createdAt = testFixedNow.Add(-protocol.MaxClockSkew + time.Minute)
+
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{skewed}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := driver.awaitOffer(ctx, testFixedNow); err != nil {
+		t.Errorf("an offer from a responder running behind must be accepted: %v", err)
+	}
+}
+
 // A request from a peer whose clock runs behind must still be answered. The
 // tolerance that admits it is the same one the protocol applies to every other
 // timestamp, so a message this accepts is one the validator would accept too.
@@ -883,8 +934,9 @@ func offerMessage(t *testing.T) scriptedMessage {
 	}
 
 	return scriptedMessage{
-		kind: protocol.TypeSessionOffer,
-		seq:  1,
+		kind:      protocol.TypeSessionOffer,
+		seq:       1,
+		createdAt: testFixedNow,
 		payload: protocol.Payload{
 			Offer: &protocol.SessionOffer{
 				TunnelKey: protocol.TunnelKey{

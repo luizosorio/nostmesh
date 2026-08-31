@@ -131,12 +131,20 @@ func (c *controlPlane) Publish(ctx context.Context, kind protocol.MessageType,
 		return fmt.Errorf("encoding envelope: %w", err)
 	}
 
-	// The message that opens a conversation is keyed by recipient, so a new
-	// attempt replaces the previous one on the relay instead of joining it. A
-	// responder must find one live request per peer, not a backlog of every
-	// session its counterpart ever abandoned.
+	// The messages that open a conversation are keyed by recipient, so a new
+	// attempt replaces the previous one on the relay instead of joining it.
+	//
+	// Both directions need it. A responder must find one live request per peer,
+	// and an initiator must find one live offer — an initiator handed an offer
+	// from a session it abandoned discards it as belonging to another
+	// conversation, and waits out its timeout while the answer to its actual
+	// request sits behind the stale one. That is the same failure the request
+	// tag fixed, seen from the other end.
+	//
+	// Everything after the opening exchange is keyed by position instead: within
+	// a session each message is distinct and nothing should replace anything.
 	positionTag := nostr.ReplaceableTag(sealed.SessionID, string(sealed.Type), sealed.Seq)
-	if kind == protocol.TypeSessionRequest {
+	if opensAConversation(kind) {
 		positionTag = nostr.OpeningTag(c.peer, string(sealed.Type))
 	}
 
@@ -169,6 +177,16 @@ func (c *controlPlane) Publish(ctx context.Context, kind protocol.MessageType,
 	// nothing else would ever report that.
 	c.recordPublication(kind, result)
 	return nil
+}
+
+// opensAConversation reports whether a message type begins an exchange rather
+// than continuing one.
+//
+// A request opens it and an offer answers that opening. Both are superseded
+// wholesale by a later attempt, so the relay should keep only the newest of
+// each per peer. Everything else belongs to a session already under way.
+func opensAConversation(kind protocol.MessageType) bool {
+	return kind == protocol.TypeSessionRequest || kind == protocol.TypeSessionOffer
 }
 
 // recordPublication remembers how a publication fared.

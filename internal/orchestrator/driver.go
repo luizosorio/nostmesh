@@ -405,16 +405,18 @@ func (d *Driver) negotiateAsInitiator(ctx context.Context, handshake *session.Ha
 		return err
 	}
 	seq := handshake.NextSeq()
+
+	// Noted before publishing, not after: an offer cannot answer a request that
+	// had not been sent when the offer was made.
+	publishedAt := d.clock.Now()
+
 	if err := d.publisher.Publish(ctx, protocol.TypeSessionRequest, seq, request); err != nil {
 		return fmt.Errorf("publishing session request: %w", err)
 	}
 
-	offer, err := d.awaitMessage(ctx, protocol.TypeSessionOffer)
+	offer, err := d.awaitOffer(ctx, publishedAt)
 	if err != nil {
 		return err
-	}
-	if offer.Payload.Offer == nil {
-		return errors.New("offer message carries no offer")
 	}
 	if err := handshake.ReceiveOffer(*offer.Payload.Offer, offer.Seq, d.clock.Now()); err != nil {
 		return err
@@ -466,6 +468,39 @@ func (d *Driver) negotiateAsResponder(ctx context.Context, handshake *session.Ha
 		return errors.New("accept message carries no accept")
 	}
 	return handshake.ReceiveAccept(*accept.Payload.Accept, accept.Seq, d.clock.Now())
+}
+
+// awaitOffer waits for an offer that answers this attempt.
+//
+// The mirror of the responder's rule, and needed for the same reason. A relay
+// replays its stored offers to a new subscription, so the first to arrive is
+// routinely the answer to a request this node has since abandoned. Acting on it
+// is impossible — the handshake refuses an offer whose hash does not match what
+// it asked — and waiting on it is worse, because the live answer is sitting
+// behind it.
+//
+// Measured against real relays, where an initiator was handed an offer from a
+// run minutes earlier and timed out with the current one already published.
+func (d *Driver) awaitOffer(ctx context.Context, requestedAt time.Time) (Delivery, error) {
+	// The tolerance is the protocol's own: the responder stamped this with its
+	// clock, and two healthy hosts disagree by up to that much.
+	notBefore := requestedAt.Add(-protocol.MaxClockSkew)
+
+	for {
+		offer, err := d.awaitMessage(ctx, protocol.TypeSessionOffer)
+		if err != nil {
+			return Delivery{}, err
+		}
+		if offer.Payload.Offer == nil {
+			return Delivery{}, errors.New("offer message carries no offer")
+		}
+
+		// Made before this attempt began, so it answers a different one.
+		if offer.CreatedAt.Before(notBefore) {
+			continue
+		}
+		return offer, nil
+	}
 }
 
 // awaitMessage waits for one message type, holding onto the others.

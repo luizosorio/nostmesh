@@ -262,6 +262,29 @@ func TestOpeningTagReplacesPreviousAttempts(t *testing.T) {
 	}
 }
 
+// An offer opens the answering half of a conversation, so it is superseded by a
+// later one exactly as a request is. Keeping both means an initiator finds an
+// offer answering a session it abandoned, discards it, and waits out its timeout
+// while the live answer sits behind it — the request-side failure seen from the
+// other end.
+func TestOpeningTagCoversBothHalvesOfTheExchange(t *testing.T) {
+	peer := testSigner(t, 32).PublicKey()
+
+	request := OpeningTag(peer, "session.request")
+	offer := OpeningTag(peer, "session.offer")
+
+	// Each half replaces only its own kind: an offer must not displace the
+	// request that prompted it.
+	if request[1] == offer[1] {
+		t.Errorf("a request and an offer share d value %q; one would replace the other", request[1])
+	}
+
+	// A second attempt of either replaces the first.
+	if OpeningTag(peer, "session.offer")[1] != offer[1] {
+		t.Error("two offers to the same peer must share a d value so the newer replaces the older")
+	}
+}
+
 func TestRecipientTag(t *testing.T) {
 	signer := testSigner(t, 9)
 	tag := RecipientTag(signer.PublicKey())
