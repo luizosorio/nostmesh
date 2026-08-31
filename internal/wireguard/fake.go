@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 )
@@ -26,6 +27,11 @@ type FakeController struct {
 	// Calls records every method invoked, in order, so a test can assert that
 	// compensation ran in reverse.
 	Calls []string
+
+	// handshakeOnApply makes an applied peer report a completed handshake.
+	// Off by default: see HandshakeOnApply.
+	handshakeOnApply bool
+	handshakeAt      time.Time
 }
 
 // NewFakeController returns an empty fake host.
@@ -126,13 +132,37 @@ func (f *FakeController) ApplyPeer(_ context.Context, name string, spec PeerSpec
 		}
 	}
 
-	iface.Peers = append(iface.Peers, PeerState{
+	peer := PeerState{
 		PublicKey:           spec.PublicKey,
 		Endpoint:            spec.Endpoint,
 		AllowedIPs:          spec.AllowedIPs,
 		PersistentKeepalive: spec.PersistentKeepalive,
-	})
+	}
+
+	// A handshake is reported only when a test asks for one. The default is a
+	// peer that is configured and carries nothing, which is the real failure
+	// this fake must be able to reproduce: a fake that handshook automatically
+	// would make every caller look successful and would never exercise the
+	// check that distinguishes a configured tunnel from a working one.
+	if f.handshakeOnApply {
+		peer.LastHandshake = f.handshakeAt
+	}
+
+	iface.Peers = append(iface.Peers, peer)
 	return nil
+}
+
+// HandshakeOnApply makes applied peers report a completed handshake.
+//
+// It exists so a test can reach the state that follows a working data plane
+// without a kernel. It must be set deliberately: leaving it off is what lets a
+// test assert that a tunnel carrying nothing is detected.
+func (f *FakeController) HandshakeOnApply(at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.handshakeOnApply = true
+	f.handshakeAt = at
 }
 
 // RemovePeer removes a peer; removing an absent one is not an error.

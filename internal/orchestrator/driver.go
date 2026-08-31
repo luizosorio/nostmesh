@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/connectivity"
@@ -50,6 +51,28 @@ type Transport interface {
 // payloads and consumes them, and the wiring decides how they travel.
 type Publisher interface {
 	Publish(ctx context.Context, kind protocol.MessageType, seq uint64, payload protocol.Payload) error
+
+	// BindSession names the session every subsequent message belongs to.
+	//
+	// The driver owns the session id, and the transport has to agree with it or
+	// the two sides label the same conversation differently. It also lets the
+	// transport reject a relay's replay of an older session, which arrives
+	// correctly signed and correctly addressed and is distinguishable only by
+	// this id.
+	//
+	// A responder calls it with an empty id: it adopts whichever session the
+	// request it answers belongs to, and Session reports what that was.
+	BindSession(sessionID string) error
+
+	// Session reports the session this conversation settled on.
+	Session() string
+
+	// SessionCreatedAt reports when the message that named the current session
+	// was published, according to its sender.
+	//
+	// A responder needs it to tell a live request from one a relay replayed out
+	// of storage: both are valid, and only their age separates them.
+	SessionCreatedAt() time.Time
 }
 
 // Receiver delivers the peer's control messages in arrival order.
@@ -77,6 +100,12 @@ type Driver struct {
 	publisher Publisher
 	receiver  Receiver
 	gatherer  *connectivity.Gatherer
+
+	// pending holds messages that arrived before the step consuming them, and
+	// tried records the sessions this responder has already answered.
+	pendingMu sync.Mutex
+	pending   map[protocol.MessageType][]heldMessage
+	tried     map[domain.SessionID]bool
 
 	options DriverOptions
 }
@@ -219,9 +248,30 @@ func (d *Driver) Connect(ctx context.Context, peer domain.NostrPublicKey, role R
 		return fmt.Errorf("%w: %s: %w", ErrUnauthorized, peer.Short(), checkErr)
 	}
 
-	sessionID, err := domain.NewSessionID(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generating session id: %w", err)
+	// The initiator names the session; the responder adopts the one the request
+	// it answers belongs to. Waiting for the request here means the responder's
+	// handshake, its manager entry and the transport all agree on one id — and
+	// a relay's replay of an older session is refused rather than answered as
+	// though it were current.
+	var (
+		sessionID domain.SessionID
+		pending   *pendingRequest
+	)
+
+	if role == RoleInitiator {
+		sessionID, err = domain.NewSessionID(rand.Reader)
+		if err != nil {
+			return fmt.Errorf("generating session id: %w", err)
+		}
+		if err = d.publisher.BindSession(sessionID.String()); err != nil {
+			return err
+		}
+	} else {
+		pending, err = d.awaitRequest(ctx)
+		if err != nil {
+			return err
+		}
+		sessionID = pending.sessionID
 	}
 
 	if _, err = d.manager.Begin(peer, sessionID); err != nil {
@@ -248,7 +298,7 @@ func (d *Driver) Connect(ctx context.Context, peer domain.NostrPublicKey, role R
 		return err
 	}
 
-	if err = d.negotiate(ctx, handshake, role); err != nil {
+	if err = d.negotiate(ctx, handshake, role, pending); err != nil {
 		return err
 	}
 
@@ -302,7 +352,7 @@ func (d *Driver) beginHandshake(peer domain.NostrPublicKey, sessionID domain.Ses
 }
 
 // negotiate runs the control-plane exchange.
-func (d *Driver) negotiate(ctx context.Context, handshake *session.Handshake, role Role) error {
+func (d *Driver) negotiate(ctx context.Context, handshake *session.Handshake, role Role, pending *pendingRequest) error {
 	peer := handshake.PeerKey()
 
 	if err := d.manager.AdvancePhase(peer, PhaseNegotiating); err != nil {
@@ -313,7 +363,7 @@ func (d *Driver) negotiate(ctx context.Context, handshake *session.Handshake, ro
 		if err := d.negotiateAsInitiator(ctx, handshake); err != nil {
 			return err
 		}
-	} else if err := d.negotiateAsResponder(ctx, handshake); err != nil {
+	} else if err := d.negotiateAsResponder(ctx, handshake, pending); err != nil {
 		return err
 	}
 
@@ -366,11 +416,12 @@ func (d *Driver) negotiateAsInitiator(ctx context.Context, handshake *session.Ha
 }
 
 // negotiateAsResponder consumes the request and answers with an offer.
-func (d *Driver) negotiateAsResponder(ctx context.Context, handshake *session.Handshake) error {
-	request, requestSeq, err := d.awaitMessage(ctx, protocol.TypeSessionRequest)
-	if err != nil {
-		return err
+func (d *Driver) negotiateAsResponder(ctx context.Context, handshake *session.Handshake, pending *pendingRequest) error {
+	if pending == nil {
+		return errors.New("a responder needs the request that opened the session")
 	}
+
+	request, requestSeq := pending.payload, pending.seq
 	if request.Request == nil {
 		return errors.New("request message carries no request")
 	}
@@ -405,12 +456,23 @@ func (d *Driver) negotiateAsResponder(ctx context.Context, handshake *session.Ha
 	return handshake.ReceiveAccept(*accept.Accept, acceptSeq, d.clock.Now())
 }
 
-// awaitMessage waits for one message type, discarding others.
+// awaitMessage waits for one message type, holding onto the others.
 //
-// A message of an unexpected type is skipped rather than treated as an error:
-// relays duplicate and reorder, so an out-of-turn arrival is ordinary. What is
-// not tolerated is waiting forever, which the context bounds.
+// Messages of other types are kept rather than dropped. Relays reorder, and the
+// two sides run concurrently, so a message legitimately arrives before the step
+// that consumes it — a candidate update while the responder is still waiting for
+// an accept, say. Discarding it would lose it permanently, and both sides would
+// then wait out their timeouts for something that already came and went.
 func (d *Driver) awaitMessage(ctx context.Context, want protocol.MessageType) (protocol.Payload, uint64, error) {
+	d.pendingMu.Lock()
+	if held, waiting := d.pending[want]; waiting && len(held) > 0 {
+		next := held[0]
+		d.pending[want] = held[1:]
+		d.pendingMu.Unlock()
+		return next.payload, next.seq, nil
+	}
+	d.pendingMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(ctx, d.options.HandshakeTimeout)
 	defer cancel()
 
@@ -422,8 +484,196 @@ func (d *Driver) awaitMessage(ctx context.Context, want protocol.MessageType) (p
 		if kind == want {
 			return payload, seq, nil
 		}
+
+		d.pendingMu.Lock()
+		if d.pending == nil {
+			d.pending = make(map[protocol.MessageType][]heldMessage)
+		}
+		// Bounded: a peer that floods one type must not grow this without
+		// limit. Beyond the bound the oldest is dropped, since a stale message
+		// of a type nothing is waiting for is the least useful thing held.
+		held := d.pending[kind]
+		if len(held) >= maxHeldPerType {
+			held = held[1:]
+		}
+		d.pending[kind] = append(held, heldMessage{seq: seq, payload: payload})
+		d.pendingMu.Unlock()
 	}
 }
+
+// heldMessage is a message that arrived before the step that consumes it.
+type heldMessage struct {
+	seq     uint64
+	payload protocol.Payload
+}
+
+// maxHeldPerType bounds how many out-of-turn messages are kept per type.
+const maxHeldPerType = 4
+
+// pendingRequest is the request a responder answers, and the session it names.
+type pendingRequest struct {
+	sessionID domain.SessionID
+	seq       uint64
+	payload   protocol.Payload
+
+	// createdAt is when the initiator says it published. It decides whether
+	// this request belongs to a live attempt or to one already abandoned.
+	createdAt time.Time
+}
+
+// awaitRequest waits for the request that opens a session.
+//
+// It runs before the handshake exists, because the session id the handshake
+// needs is the one this request carries. The transport adopts that id as it
+// arrives, so everything afterwards — the manager entry, the handshake, the
+// messages published — refers to the same session.
+func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
+	// A relay answers a new subscription with everything it already holds, so
+	// a request from an earlier attempt arrives first and looks perfectly
+	// valid: correctly signed, correctly addressed, not yet expired.
+	//
+	// Answering it is not a harmless mistake. The initiator has moved on to a
+	// new session, so the offer references one it is no longer running, and
+	// both sides wait out their timeouts having exchanged messages that could
+	// never match.
+	//
+	// Timestamps cannot settle this on their own. The tolerance a healthy pair
+	// of hosts needs for clock skew is minutes, and the age difference between
+	// a live request and an abandoned one is often seconds, so any threshold
+	// wide enough to be safe is also wide enough to admit the stale one.
+	//
+	// What does separate them is the session. A responder takes the newest
+	// request it sees within a short window after the first one arrives, and
+	// having answered a session, never adopts it again: an initiator that is
+	// still running republishes, so its request comes back, while an abandoned
+	// one does not.
+	deadline := d.clock.Now().Add(requestSelectionWindow)
+
+	var newest *pendingRequest
+	for {
+		remaining := time.Until(deadline)
+		if newest != nil && remaining <= 0 {
+			return d.settle(newest)
+		}
+
+		request, err := d.readWithin(ctx, newest != nil, remaining)
+		if err != nil {
+			if newest != nil {
+				// The window closed with something in hand, which is the
+				// expected end rather than a failure.
+				return d.settle(newest)
+			}
+			return nil, err
+		}
+
+		if d.alreadyTried(request.sessionID) {
+			continue
+		}
+		if newest == nil || request.createdAt.After(newest.createdAt) {
+			newest = request
+		}
+	}
+}
+
+// settle binds the session the responder chose.
+//
+// Reading requests leaves the transport reset, so the session has to be bound
+// back before anything is published. Without it the offer goes out naming no
+// session, and the initiator discards it as belonging to a different
+// conversation — which is exactly how it failed against a real relay.
+func (d *Driver) settle(request *pendingRequest) (*pendingRequest, error) {
+	if err := d.publisher.BindSession(request.sessionID.String()); err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+// readWithin reads a request, bounded by the selection window once one is held.
+//
+// Before anything has arrived the wait is unbounded, because a responder may
+// legitimately sit idle for as long as the operator allows. Once a request is in
+// hand the wait is short: it is only looking for a newer one to supersede it.
+func (d *Driver) readWithin(ctx context.Context, bounded bool, remaining time.Duration) (*pendingRequest, error) {
+	if !bounded {
+		return d.readRequest(ctx)
+	}
+
+	window, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+
+	return d.readRequest(window)
+}
+
+// alreadyTried reports whether this responder has already answered a session.
+//
+// A relay hands back stored requests on every poll, so without this the
+// responder answers the same abandoned session indefinitely, never reaching the
+// live one behind it.
+func (d *Driver) alreadyTried(sessionID domain.SessionID) bool {
+	d.pendingMu.Lock()
+	defer d.pendingMu.Unlock()
+
+	if d.tried == nil {
+		d.tried = make(map[domain.SessionID]bool)
+	}
+	if d.tried[sessionID] {
+		return true
+	}
+	d.tried[sessionID] = true
+	return false
+}
+
+// requestSelectionWindow is how long a responder collects requests before
+// answering the newest.
+//
+// It starts when the responder begins waiting, not when the first request
+// arrives, so a relay replaying its backlog and a live request published moments
+// later are weighed against each other rather than raced.
+const requestSelectionWindow = 5 * time.Second
+
+// readRequest waits for one request and reports the session it named.
+//
+// The transport is reset to "adopt whatever arrives" on each call, because this
+// runs in a loop that may see several requests and must learn each one's session
+// rather than keep the first. The caller is responsible for binding the session
+// it finally settles on — leaving the transport reset would publish the offer
+// with no session at all, which is a message the initiator cannot match.
+func (d *Driver) readRequest(ctx context.Context) (*pendingRequest, error) {
+	previous := d.publisher.Session()
+
+	if err := d.publisher.BindSession(""); err != nil {
+		return nil, err
+	}
+
+	payload, seq, err := d.awaitMessage(ctx, protocol.TypeSessionRequest)
+	if err != nil {
+		// The reset must not outlive a failed read. Leaving the transport
+		// cleared here is how an offer goes out naming no session at all: the
+		// loop resets, times out looking for a newer request, and the session
+		// it had already settled on is gone.
+		_ = d.publisher.BindSession(previous)
+		return nil, err
+	}
+
+	adopted := d.publisher.Session()
+	if adopted == "" {
+		return nil, errors.New("the request named no session")
+	}
+
+	sessionID, err := domain.ParseSessionID(adopted)
+	if err != nil {
+		return nil, fmt.Errorf("the request named an unusable session: %w", err)
+	}
+
+	return &pendingRequest{
+		sessionID: sessionID,
+		seq:       seq,
+		payload:   payload,
+		createdAt: d.publisher.SessionCreatedAt(),
+	}, nil
+}
+
+
 
 // keyLifetime bounds how long a negotiated tunnel key stays valid.
 const keyLifetime = time.Hour

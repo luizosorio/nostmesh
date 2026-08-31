@@ -114,6 +114,78 @@ func TestInboxSubscriptionFiltersByKindAndRecipient(t *testing.T) {
 	if recipients[0] != self.String() {
 		t.Errorf("filter selects %v, want this node", recipients[0])
 	}
+
+	// Without a lower bound the relay replays every message this node was ever
+	// sent. All of them are expired and all are refused, and the live message
+	// the node is waiting for is lost in the flood — observed against real
+	// relays, where a responder received nine expired messages and not the
+	// request that was published seconds earlier.
+	since, ok := filter["since"].(float64)
+	if !ok {
+		t.Fatalf("filter must bound how far back it asks, got %v", filter["since"])
+	}
+
+	// The window must extend past the envelope lifetime by the protocol's own
+	// clock-skew tolerance. This node's clock and the sender's disagree in
+	// practice: a peer running a couple of minutes behind stamps events that a
+	// strictly computed window silently excludes, and the session then fails
+	// with nothing ever arriving. Observed against real relays, where a host
+	// 132 seconds behind published requests its peer could not see.
+	required := testNow().Add(-inboxLookback - protocol.MaxClockSkew)
+	if int64(since) > required.Unix() {
+		t.Errorf("since is %d, but must reach back to %d to tolerate a peer's clock skew",
+			int64(since), required.Unix())
+	}
+	if int64(since) > testNow().Unix() {
+		t.Error("since is in the future; a message published just before subscribing would be missed")
+	}
+}
+
+// A relay answers a subscription immediately with the events it already holds,
+// and a delivery with no reader registered is dropped rather than queued.
+//
+// So a caller that subscribes before registering its reader loses exactly the
+// stored messages it subscribed to collect. This was found against real relays,
+// where a responder waited out its whole timeout for a request the relay had
+// already delivered into nothing.
+func TestStoredEventsReachAReaderRegisteredFirst(t *testing.T) {
+	server := newRelayServer(t)
+
+	_, stored, err := BuildEvent(testSigner(t, 20), protocol.ExperimentalKind, nil, "stored", testNow())
+	if err != nil {
+		t.Fatalf("building event: %v", err)
+	}
+	server.deliverEvent(stored)
+
+	set := testRelaySet(t, server.url())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := set.Connect(ctx); err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+
+	// Reader first, subscription second — the order the wiring must use.
+	received := set.Client().Subscribe(ctx, 16, func(PublishedEvent) (LogicalKey, error) {
+		return LogicalKey{SessionID: "s", Type: "t", Seq: 0}, nil
+	})
+
+	if err := set.SubscribeToInbox(ctx, testSigner(t, 21).PublicKey()); err != nil {
+		t.Fatalf("subscribing: %v", err)
+	}
+
+	select {
+	case event, open := <-received:
+		if !open {
+			t.Fatal("the stream closed before delivering the stored event")
+		}
+		if len(event.Event.Raw) == 0 {
+			t.Error("the delivered event is empty")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stored event was never delivered; a reader registered before subscribing must receive it")
+	}
 }
 
 // A relay keeps no memory of a subscription across connections. A reconnection

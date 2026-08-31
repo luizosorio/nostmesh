@@ -39,6 +39,7 @@ func commands() []command {
 		{"down", "Remove what NostMesh applied", runDown},
 		{"doctor", "Check prerequisites and diagnose problems", runDoctor},
 		{"connect", "Negotiate a session with a peer", runConnect},
+		{"listen", "Wait for a peer to open a session", runListen},
 		{"sessions", "List authorized peers and active sessions", runSessions},
 		{"disconnect", "Close a session", runDisconnect},
 		{"relay-check", "Check real relays accept this protocol", runRelayCheck},

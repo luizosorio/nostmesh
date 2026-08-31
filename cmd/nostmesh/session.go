@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
 )
 
@@ -17,6 +23,7 @@ func runConnect(args []string, stdout, stderr *output) int {
 	flags.SetOutput(stderr.w)
 	configPath := flags.String("config", "", "path to the configuration file (required)")
 	peerKey := flags.String("peer", "", "peer's Nostr public key, hex (required)")
+	timeout := flags.Duration("timeout", sessionTimeout, "how long to wait for the session to establish")
 
 	flags.Usage = func() {
 		stderr.printf("Usage: nostmesh connect --config <path> --peer <pubkey>\n\n" +
@@ -59,10 +66,122 @@ func runConnect(args []string, stdout, stderr *output) int {
 		return exitError
 	}
 
-	stderr.printf("nostmesh connect: relay transport is not wired yet; this arrives in M1.4\n")
-	stderr.printf("the peer is authorized and the handshake is implemented; what is missing\n")
-	stderr.printf("is publishing over relays, which needs the WebSocket client\n")
-	return exitError
+	return runSession(cfg, peer, orchestrator.RoleInitiator, *timeout, stdout, stderr)
+}
+
+// runListen waits for a peer to open a session with this node.
+//
+// The responder has to be listening before the request arrives, which is why
+// this is a foreground process rather than something `connect` could do on its
+// own. It is deliberately not a daemon: a daemon needs a control socket, a pid
+// file and an IPC surface, none of which the current acceptance criteria ask
+// for. Supervision belongs to systemd or a container runtime.
+func runListen(args []string, stdout, stderr *output) int {
+	flags := flag.NewFlagSet("listen", flag.ContinueOnError)
+	flags.SetOutput(stderr.w)
+	configPath := flags.String("config", "", "path to the configuration file (required)")
+	peerKey := flags.String("peer", "", "peer's Nostr public key, hex (required)")
+	timeout := flags.Duration("timeout", sessionTimeout, "how long to wait for the session to establish")
+
+	flags.Usage = func() {
+		stderr.printf("Usage: nostmesh listen --config <path> --peer <pubkey>\n\n" +
+			"Wait for a peer to open a session, and answer it.\n\n" +
+			"The peer must already be authorized: local policy denies by default.\n" +
+			"This runs in the foreground until the tunnel is established or the\n" +
+			"timeout expires.\n\nFlags:\n")
+		flags.PrintDefaults()
+	}
+
+	if err := flags.Parse(args); err != nil {
+		return exitUsage
+	}
+	if *configPath == "" || *peerKey == "" {
+		stderr.printf("nostmesh listen: --config and --peer are required\n")
+		return exitUsage
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		stderr.printf("%v\n", err)
+		return exitError
+	}
+
+	peer, err := domain.ParseNostrPublicKey(*peerKey)
+	if err != nil {
+		stderr.printf("nostmesh listen: %v\n", err)
+		return exitError
+	}
+
+	allowlist, err := loadAllowlist(cfg)
+	if err != nil {
+		stderr.printf("nostmesh listen: %v\n", err)
+		return exitError
+	}
+	if err := allowlist.Check(peer, policy.ActionSession); err != nil {
+		stderr.printf("nostmesh listen: %v\n", err)
+		stderr.printf("add it to policy.authorized_peers in %s to authorize it\n", *configPath)
+		return exitError
+	}
+
+	return runSession(cfg, peer, orchestrator.RoleResponder, *timeout, stdout, stderr)
+}
+
+// runSession builds the runtime and drives one session to a carrying tunnel.
+//
+// Interrupting it tears down cleanly rather than leaving a half-configured
+// interface: a signal is a request to stop, not permission to abandon kernel
+// state.
+func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator.Role,
+	timeout time.Duration, stdout, stderr *output,
+) int {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	stdout.printf("connecting to %s\n", peer.Short())
+
+	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout)
+	if err != nil {
+		stderr.printf("nostmesh: %v\n", err)
+		return exitError
+	}
+	defer runtime.cleanup()
+
+	// Relays are kept connected for the duration. A relay that drops mid-session
+	// is redialled and resubscribed, since a peer may still be publishing to it.
+	go runtime.set.Supervise(ctx)
+
+	// Some relays answer a subscription from storage and then never push what
+	// arrives afterwards. Polling reissues the subscription so those still
+	// deliver, at the cost of a small query every few seconds.
+	go runtime.set.Poll(ctx)
+
+	if err := runtime.driver.Connect(ctx, peer, role); err != nil {
+		stderr.printf("nostmesh: %v\n", err)
+
+		// What this node managed to publish is half the diagnosis. A session
+		// that failed having published nothing is a different problem from one
+		// that published and was not answered.
+		for _, line := range runtime.plane.Publications() {
+			stderr.printf("  published %s\n", line)
+		}
+		return exitError
+	}
+
+	stdout.printf("tunnel established with %s\n", peer.Short())
+	stdout.printf("run 'nostmesh status --config <path>' to inspect it\n")
+	return exitOK
 }
 
 // runSessions lists what the node knows about its sessions.

@@ -45,6 +45,15 @@ type relayServer struct {
 	server *httptest.Server
 }
 
+// deliverEvent seeds an event the relay already holds, so a subscription is
+// answered with stored content the way a real relay answers one.
+func (s *relayServer) deliverEvent(raw []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.deliver = append(s.deliver, json.RawMessage(raw))
+}
+
 // subscriptionFilters returns the filters this relay was asked to subscribe.
 func (s *relayServer) subscriptionFilters() []map[string]any {
 	s.mu.Lock()
