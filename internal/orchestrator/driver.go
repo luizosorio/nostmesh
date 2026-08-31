@@ -578,23 +578,43 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	// both sides wait out their timeouts having exchanged messages that could
 	// never match.
 	//
-	// The rule is that a responder answers requests addressed to it while it was
-	// listening, not requests it finds lying around.
+	// A responder answers requests made while it was listening, and among those
+	// the newest.
 	//
-	// A window in which a newer request supersedes an older one does not work:
-	// the stale one arrives instantly from the relay's store while the live one
-	// is published seconds later, by which time any window short enough to be
-	// useful has closed. Measured against real relays, the responder answered a
-	// session from a run minutes earlier while the initiator was running a
-	// different one, and both waited out their timeouts.
+	// Both halves are needed. The age bound rejects a request from an attempt
+	// abandoned long ago; the settling window handles the case the age bound
+	// cannot, where an initiator retried seconds before this node started and
+	// the relay still holds the previous attempt as live. Measured against real
+	// relays, where a responder answered a request from the run before while
+	// the initiator was already on its next one.
 	//
-	// The tolerance is the protocol's own: the initiator stamped this with its
-	// clock, and two healthy hosts disagree by up to that much.
+	// The window is measured from the first request's arrival, and against the
+	// system clock, because it bounds a wait on a real socket. An injected clock
+	// belongs to the domain's reasoning about validity, not to how long a
+	// goroutine sleeps.
 	notBefore := d.clock.Now().Add(-protocol.MaxClockSkew)
 
+	var (
+		newest   *pendingRequest
+		deadline time.Time
+	)
+
 	for {
-		request, err := d.readRequest(ctx)
+		remaining := time.Duration(0)
+		if newest != nil {
+			remaining = time.Until(deadline)
+			if remaining <= 0 {
+				return d.settle(newest)
+			}
+		}
+
+		request, err := d.readRequest(ctx, newest != nil, remaining)
 		if err != nil {
+			if newest != nil {
+				// The window closing with something in hand is the expected
+				// end, not a failure.
+				return d.settle(newest)
+			}
 			return nil, err
 		}
 
@@ -604,15 +624,31 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 			continue
 		}
 
-		// Published before this node began listening, so it belongs to a
-		// conversation this node was not part of.
+		// Published before this node began listening by more than two healthy
+		// clocks could disagree, so it belongs to a conversation this node was
+		// not part of.
 		if request.createdAt.Before(notBefore) {
 			continue
 		}
 
-		return d.settle(request)
+		if newest == nil {
+			deadline = time.Now().Add(requestSettleWindow)
+			newest = request
+			continue
+		}
+		if request.createdAt.After(newest.createdAt) {
+			newest = request
+		}
 	}
 }
+
+// requestSettleWindow is how long a responder keeps looking for a newer request
+// after the first acceptable one arrives.
+//
+// Short enough not to delay a legitimate initiator, long enough for a relay to
+// finish replaying what it holds and for a retry published moments earlier to
+// arrive behind it.
+const requestSettleWindow = 3 * time.Second
 
 // settle binds the session the responder chose.
 //
@@ -652,7 +688,16 @@ func (d *Driver) alreadyTried(sessionID domain.SessionID) bool {
 // consults transport state. That is what lets this run in a loop over several
 // candidate requests without the transport binding itself to whichever the
 // relay happened to replay first.
-func (d *Driver) readRequest(ctx context.Context) (*pendingRequest, error) {
+func (d *Driver) readRequest(ctx context.Context, bounded bool, within time.Duration) (*pendingRequest, error) {
+	// Before anything acceptable has arrived the wait is unbounded: a responder
+	// may legitimately sit idle for as long as the operator allows. Once one is
+	// in hand the wait is short, because it is only looking for a newer one.
+	if bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, within)
+		defer cancel()
+	}
+
 	delivery, err := d.awaitMessage(ctx, protocol.TypeSessionRequest)
 	if err != nil {
 		return nil, err
