@@ -169,6 +169,21 @@ func (s *RelaySet) Dropped() int {
 	return total
 }
 
+// ClosedSubscriptions reports subscriptions the relays ended, and the last
+// reason any of them gave.
+func (s *RelaySet) ClosedSubscriptions() (int, string) {
+	var total int
+	var reason string
+	for _, relay := range s.relays {
+		count, why := relay.SubscriptionClosed()
+		total += count
+		if why != "" {
+			reason = why
+		}
+	}
+	return total, reason
+}
+
 // Connected reports how many relays are currently up.
 func (s *RelaySet) Connected() int {
 	var up int
@@ -186,9 +201,23 @@ func (s *RelaySet) Connected() int {
 // only what concerns this node rather than every message of this kind on the
 // network.
 func (s *RelaySet) SubscribeToInbox(ctx context.Context, self domain.NostrPublicKey) error {
-	subscriptionID, err := randomSubscriptionID()
-	if err != nil {
-		return err
+	// The identifier is generated once and reused for every later reissue.
+	//
+	// A relay caps concurrent subscriptions per connection. Sending a fresh
+	// identifier on each poll opens a new one every interval, and once the cap
+	// is reached the relay refuses or closes them — after which the client
+	// believes it is subscribed and receives nothing at all. Reusing the
+	// identifier makes a reissue replace the subscription rather than add one.
+	s.mu.Lock()
+	subscriptionID := s.subscriptionID
+	s.mu.Unlock()
+
+	if subscriptionID == "" {
+		generated, err := randomSubscriptionID()
+		if err != nil {
+			return err
+		}
+		subscriptionID = generated
 	}
 
 	// One envelope lifetime back, plus an allowance for clock skew.

@@ -42,6 +42,14 @@ type relayServer struct {
 	// shows whether a reconnecting client reissued one.
 	subscriptions []map[string]any
 
+	// requestedIDs records the identifier of every REQ, which is what shows
+	// whether a reissue replaced a subscription or opened another one.
+	requestedIDs []string
+
+	// closeReason, when set, makes the relay answer every REQ with CLOSED, as
+	// one at its concurrent-subscription limit does.
+	closeReason string
+
 	server *httptest.Server
 }
 
@@ -52,6 +60,25 @@ func (s *relayServer) deliverEvent(raw []byte) {
 	defer s.mu.Unlock()
 
 	s.deliver = append(s.deliver, json.RawMessage(raw))
+}
+
+// subscriptionIDs returns the identifier of every REQ received, in order.
+func (s *relayServer) subscriptionIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]string, len(s.requestedIDs))
+	copy(out, s.requestedIDs)
+	return out
+}
+
+// closeSubscriptions makes the relay answer every REQ with CLOSED, as one at its
+// subscription limit does.
+func (s *relayServer) closeSubscriptions(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closeReason = reason
 }
 
 // subscriptionFilters returns the filters this relay was asked to subscribe.
@@ -153,9 +180,20 @@ func (s *relayServer) handleRequest(ctx context.Context, conn *websocket.Conn, r
 
 	s.mu.Lock()
 	s.subscriptions = append(s.subscriptions, filter)
+	s.requestedIDs = append(s.requestedIDs, subscriptionID)
+	closeReason := s.closeReason
 	deliver := make([]json.RawMessage, len(s.deliver))
 	copy(deliver, s.deliver)
 	s.mu.Unlock()
+
+	if closeReason != "" {
+		frame, err := json.Marshal([]any{"CLOSED", subscriptionID, closeReason})
+		if err != nil {
+			return
+		}
+		_ = conn.Write(ctx, websocket.MessageText, frame)
+		return
+	}
 
 	for _, event := range deliver {
 		frame, err := json.Marshal([]any{"EVENT", subscriptionID, event})

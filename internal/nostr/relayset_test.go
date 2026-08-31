@@ -188,6 +188,81 @@ func TestStoredEventsReachAReaderRegisteredFirst(t *testing.T) {
 	}
 }
 
+// A relay caps concurrent subscriptions per connection. Polling with a fresh
+// identifier each time opens a new subscription every interval, and once the cap
+// is reached the relay refuses or closes them — after which the client believes
+// it is subscribed and receives nothing at all.
+//
+// Reissuing under the same identifier replaces the subscription rather than
+// adding one. Found against real relays, where a responder stopped receiving
+// anything after polling had run for a while.
+func TestReissuingASubscriptionReusesItsIdentifier(t *testing.T) {
+	server := newRelayServer(t)
+	set := testRelaySet(t, server.url())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := set.Connect(ctx); err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+
+	self := testSigner(t, 22).PublicKey()
+	for range 3 {
+		if err := set.SubscribeToInbox(ctx, self); err != nil {
+			t.Fatalf("subscribing: %v", err)
+		}
+	}
+
+	waitForSubscriptions(t, server, 3)
+
+	identifiers := server.subscriptionIDs()
+	if len(identifiers) < 3 {
+		t.Fatalf("relay saw %d subscriptions, expected 3", len(identifiers))
+	}
+
+	for i, id := range identifiers {
+		if id != identifiers[0] {
+			t.Errorf("subscription %d used identifier %q, expected %q; each reissue opens a new subscription instead of replacing one",
+				i, id, identifiers[0])
+		}
+	}
+}
+
+// A relay closing a subscription is stating it will send nothing more. Ignoring
+// it leaves a socket that is open, healthy-looking and permanently silent — and
+// a wait that ends with no explanation.
+func TestAClosedSubscriptionIsReported(t *testing.T) {
+	server := newRelayServer(t)
+	set := testRelaySet(t, server.url())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := set.Connect(ctx); err != nil {
+		t.Fatalf("connecting: %v", err)
+	}
+
+	server.closeSubscriptions("rate-limited: too many concurrent REQs")
+
+	if err := set.SubscribeToInbox(ctx, testSigner(t, 23).PublicKey()); err != nil {
+		t.Fatalf("subscribing: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if closed, reason := set.ClosedSubscriptions(); closed > 0 {
+			if reason == "" {
+				t.Error("the relay's stated reason was discarded")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("a closed subscription was never reported; the wait would end with no explanation")
+}
+
 // A relay keeps no memory of a subscription across connections. A reconnection
 // that does not reissue one leaves a socket that is open and permanently
 // silent — the node looks healthy and never receives anything, which is the

@@ -60,6 +60,12 @@ type WebSocketRelay struct {
 	// which are different problems with different fixes.
 	dropped int
 
+	// closedSubscriptions counts CLOSED frames, with the relay's last stated
+	// reason. A relay that closes a subscription stops serving it, so a client
+	// that ignores this waits forever on a socket the relay has abandoned.
+	closedSubscriptions int
+	lastClosedReason    string
+
 	clock func() time.Time
 }
 
@@ -301,7 +307,13 @@ func (r *WebSocketRelay) dispatch(payload []byte) {
 		r.handleVerdict(frame)
 	case "EVENT":
 		r.handleEvent(frame)
-	case "NOTICE", "EOSE", "CLOSED":
+	case "CLOSED":
+		// The relay has ended a subscription. Ignoring it leaves the client
+		// believing it is subscribed while the relay has stopped serving it —
+		// a socket that is open, healthy-looking and permanently silent.
+		r.handleClosed(frame)
+
+	case "NOTICE", "EOSE":
 		// Informational. A NOTICE is a relay's opinion, and this client does
 		// not act on opinions.
 	}
@@ -386,6 +398,32 @@ func (r *WebSocketRelay) handleEvent(frame []json.RawMessage) {
 		r.dropped += dropped
 		r.mu.Unlock()
 	}
+}
+
+// handleClosed records that the relay ended a subscription.
+func (r *WebSocketRelay) handleClosed(frame []json.RawMessage) {
+	var reason string
+	if len(frame) > 2 {
+		_ = json.Unmarshal(frame[2], &reason)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.closedSubscriptions++
+	r.lastClosedReason = reason
+}
+
+// SubscriptionClosed reports whether the relay has ended a subscription, and
+// why it said it did.
+//
+// A closed subscription is the relay stating it will send nothing more. Without
+// surfacing it, the failure is a wait that ends empty for no visible reason.
+func (r *WebSocketRelay) SubscriptionClosed() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.closedSubscriptions, r.lastClosedReason
 }
 
 // Dropped reports how many deliveries this relay discarded for want of a reader.

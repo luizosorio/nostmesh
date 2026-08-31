@@ -376,6 +376,15 @@ func (c *controlPlane) explainTimeout(cause error) error {
 			cause, dropped, c.rejected)
 	}
 
+	// A relay that closed the subscription said it would send nothing more.
+	// Without reporting it, the wait simply ends with no explanation.
+	if closed, reason := c.set.ClosedSubscriptions(); closed > 0 {
+		if reason == "" {
+			reason = "no reason given"
+		}
+		return fmt.Errorf("%w (a relay closed the subscription %d time(s): %s)", cause, closed, reason)
+	}
+
 	if c.rejected == 0 {
 		return fmt.Errorf("%w (no messages arrived from the peer)", cause)
 	}
