@@ -37,7 +37,22 @@ type relayServer struct {
 	// how a relay that has stopped responding looks from the client side.
 	silent bool
 
+	// subscriptions records the filter of every REQ received, in order. A real
+	// relay forgets a subscription when the connection ends, so this is what
+	// shows whether a reconnecting client reissued one.
+	subscriptions []map[string]any
+
 	server *httptest.Server
+}
+
+// subscriptionFilters returns the filters this relay was asked to subscribe.
+func (s *relayServer) subscriptionFilters() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]map[string]any, len(s.subscriptions))
+	copy(out, s.subscriptions)
+	return out
 }
 
 func newRelayServer(t *testing.T) *relayServer {
@@ -83,7 +98,11 @@ func (s *relayServer) handle(w http.ResponseWriter, r *http.Request) {
 		case "EVENT":
 			s.handlePublish(ctx, conn, frame[1])
 		case "REQ":
-			s.handleRequest(ctx, conn, frame[1])
+			var filter json.RawMessage
+			if len(frame) > 2 {
+				filter = frame[2]
+			}
+			s.handleRequest(ctx, conn, frame[1], filter)
 		}
 	}
 }
@@ -112,13 +131,19 @@ func (s *relayServer) handlePublish(ctx context.Context, conn *websocket.Conn, r
 	_ = conn.Write(ctx, websocket.MessageText, answer)
 }
 
-func (s *relayServer) handleRequest(ctx context.Context, conn *websocket.Conn, rawID json.RawMessage) {
+func (s *relayServer) handleRequest(ctx context.Context, conn *websocket.Conn, rawID, rawFilter json.RawMessage) {
 	var subscriptionID string
 	if err := json.Unmarshal(rawID, &subscriptionID); err != nil {
 		return
 	}
 
+	var filter map[string]any
+	if len(rawFilter) > 0 {
+		_ = json.Unmarshal(rawFilter, &filter)
+	}
+
 	s.mu.Lock()
+	s.subscriptions = append(s.subscriptions, filter)
 	deliver := make([]json.RawMessage, len(s.deliver))
 	copy(deliver, s.deliver)
 	s.mu.Unlock()
