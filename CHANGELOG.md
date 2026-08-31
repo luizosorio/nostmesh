@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- End-to-end testbed: two nodes, three simulated relays, exercising the real
+  protocol path from handshake to verified connectivity (M1.5).
+- WebSocket relay client behind the same interface the fake implements, so the
+  adversarial tests written in M1.2 describe the real transport too.
+- Roaming: an endpoint change updates the tunnel without changing the session
+  identity, its authorization or its keys — and only after the new address is
+  verified.
+- `nostmesh relay-check`, a manual verification against real relays using a
+  throwaway identity. Not part of the test suite.
+- Relay and observer configuration, with `doctor` warning when fewer than three
+  relays are configured.
+- Tutorial for a tunnel negotiated over Nostr, including the limits.
+
+### Fixed
+
+- The relay client matched publication verdicts against the caller's identifier
+  rather than the event id a relay actually answers with, so every publication
+  timed out and was reported as a refusal. Found by checking against real
+  relays; the fake had been echoing the caller's id, which hid it entirely. The
+  fake now answers with the event id, as a real relay does.
+
+### Added
+
 - Connectivity discovery: candidates gathered from local interfaces, static
   configuration and STUN observers, ordered so a node that can connect directly
   never tells a stranger it exists (M1.4).

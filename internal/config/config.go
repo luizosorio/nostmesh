@@ -45,6 +45,17 @@ type Node struct {
 	// MTU is the tunnel interface MTU. Zero uses the adapter default of 1420,
 	// which leaves room for the WireGuard header inside a 1500-byte path.
 	MTU int `toml:"mtu" json:"mtu"`
+
+	// Relays are the Nostr relays used for signalling. Three or more is
+	// recommended: relays are untrusted for availability, and redundancy is
+	// what keeps one going down from stopping the control plane.
+	//
+	// They never carry user traffic. That goes over WireGuard.
+	Relays []string `toml:"relays" json:"relays,omitempty"`
+
+	// Observers are STUN servers used to discover this node's mapped address,
+	// consulted only when local discovery finds nothing routable.
+	Observers []string `toml:"observers" json:"observers,omitempty"`
 }
 
 // Log configures structured logging.

@@ -61,6 +61,8 @@ func runDoctor(args []string, stdout, stderr *output) int {
 			checkIdentity(cfg),
 			checkJournal(cfg),
 			checkPeers(cfg),
+			checkAuthorizedPeers(cfg),
+			checkRelays(cfg),
 		)
 		checks = append(checks, checkWireGuard()...)
 	}
@@ -139,6 +141,57 @@ func checkJournal(cfg config.Config) checkResult {
 			fmt.Sprintf("%d interrupted transaction(s); run 'nostmesh down' to reconcile", len(pending))}
 	}
 	return checkResult{"journal", statusOK, "no interrupted transactions"}
+}
+
+// checkAuthorizedPeers reports the allowlist, which is the whole authorization
+// surface. An empty one is not an error — it is deny-by-default working — but
+// an operator wondering why nothing connects needs to see it.
+func checkAuthorizedPeers(cfg config.Config) checkResult {
+	authorized := 0
+	revoked := 0
+
+	for _, peer := range cfg.Policy.AuthorizedPeers {
+		if peer.Revoked {
+			revoked++
+			continue
+		}
+		authorized++
+	}
+
+	switch {
+	case authorized == 0 && revoked == 0:
+		return checkResult{"authorized peers", statusWarn,
+			"none; local policy denies by default, so no peer can open a session"}
+	case authorized == 0:
+		return checkResult{"authorized peers", statusWarn,
+			fmt.Sprintf("none active, %d revoked", revoked)}
+	default:
+		detail := fmt.Sprintf("%d authorized", authorized)
+		if revoked > 0 {
+			detail += fmt.Sprintf(", %d revoked", revoked)
+		}
+		return checkResult{"authorized peers", statusOK, detail}
+	}
+}
+
+// checkRelays reports the configured relay set.
+//
+// Three is the documented minimum, because the control plane is expected to
+// keep working with one down. Fewer is allowed and worth flagging: a single
+// relay is a single point of failure for signalling.
+func checkRelays(cfg config.Config) checkResult {
+	count := len(cfg.Node.Relays)
+
+	switch {
+	case count == 0:
+		return checkResult{"relays", statusWarn,
+			"none configured; sessions cannot be negotiated without a control plane"}
+	case count < 3:
+		return checkResult{"relays", statusWarn,
+			fmt.Sprintf("%d configured; three or more is recommended so one going down does not stop signalling", count)}
+	default:
+		return checkResult{"relays", statusOK, fmt.Sprintf("%d configured", count)}
+	}
 }
 
 func checkPeers(cfg config.Config) checkResult {

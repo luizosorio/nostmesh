@@ -245,3 +245,64 @@ func TestValidateReportsAllProblems(t *testing.T) {
 		t.Fatalf("expected 3 problems, got %d: %v", len(errs), err)
 	}
 }
+
+// A mistyped relay URL means a session with less redundancy than the operator
+// intended, which is worth catching at validation rather than discovering when
+// a relay goes down.
+func TestRelayValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		relays  []string
+		wantErr bool
+	}{
+		{"valid wss", []string{"wss://relay.example"}, false},
+		{"valid ws", []string{"ws://localhost:8080"}, false},
+		{"three relays", []string{"wss://a.example", "wss://b.example", "wss://c.example"}, false},
+		{"empty entry", []string{""}, true},
+		{"missing scheme", []string{"relay.example"}, true},
+		{"wrong scheme", []string{"https://relay.example"}, true},
+		{"duplicate", []string{"wss://a.example", "wss://a.example"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Node.Relays = tt.relays
+
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Error("expected validation to fail")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("expected the relays to validate, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestObserverValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		observers []string
+		wantErr   bool
+	}{
+		{"valid", []string{"stun.example:3478"}, false},
+		{"empty entry", []string{""}, true},
+		{"no port", []string{"stun.example"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Node.Observers = tt.observers
+
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Error("expected validation to fail")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("expected the observers to validate, got: %v", err)
+			}
+		})
+	}
+}

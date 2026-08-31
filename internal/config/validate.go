@@ -104,6 +104,62 @@ func (n Node) validate() Errors {
 		errs = append(errs, Error{"node.mtu", fmt.Sprintf("must be between 1280 and 1500, got %d", n.MTU)})
 	}
 
+	errs = append(errs, validateRelayURLs(n.Relays)...)
+	errs = append(errs, validateObservers(n.Observers)...)
+
+	return errs
+}
+
+// validateRelayURLs checks the relay set.
+//
+// A relay carries signalling, not traffic, so a mistyped URL means a session
+// that silently has less redundancy than the operator intended.
+func validateRelayURLs(relays []string) Errors {
+	var errs Errors
+
+	seen := make(map[string]int, len(relays))
+
+	for i, relay := range relays {
+		field := fmt.Sprintf("node.relays[%d]", i)
+
+		switch {
+		case relay == "":
+			errs = append(errs, Error{field, "must not be empty"})
+			continue
+		case !strings.HasPrefix(relay, "wss://") && !strings.HasPrefix(relay, "ws://"):
+			errs = append(errs, Error{field,
+				fmt.Sprintf("must start with wss:// or ws://, got %q", relay)})
+			continue
+		}
+
+		if first, duplicate := seen[relay]; duplicate {
+			errs = append(errs, Error{field,
+				fmt.Sprintf("duplicates node.relays[%d]; a repeated relay adds no redundancy", first)})
+			continue
+		}
+		seen[relay] = i
+	}
+
+	return errs
+}
+
+// validateObservers checks STUN server addresses.
+func validateObservers(observers []string) Errors {
+	var errs Errors
+
+	for i, observer := range observers {
+		field := fmt.Sprintf("node.observers[%d]", i)
+
+		if observer == "" {
+			errs = append(errs, Error{field, "must not be empty"})
+			continue
+		}
+		if _, _, err := net.SplitHostPort(observer); err != nil {
+			errs = append(errs, Error{field,
+				fmt.Sprintf("must be host:port, got %q", observer)})
+		}
+	}
+
 	return errs
 }
 
