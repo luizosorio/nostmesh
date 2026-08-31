@@ -16,6 +16,11 @@
 | `github.com/nbd-wtf/go-nostr` | v0.52.3 | MIT |
 | `github.com/btcsuite/btcd` | v2.3.5 | ISC |
 | `github.com/decred/dcrd` | v4.4.0 | ISC |
+| `github.com/pion/stun` | v3.1.7 | MIT |
+| `github.com/pion/logging` | v0.2.4 | MIT |
+| `github.com/pion/transport` | v4.0.0 | MIT |
+| `github.com/wlynxg/anet` | v0.0.5 | BSD-3-Clause |
+| `github.com/pion/dtls` | v3.0.7 | MIT | *(test dependency of `pion/stun`; not imported, does not reach the binary)* |
 
 - `golang.org/x/crypto` supplies Curve25519, used to derive WireGuard public
   keys.
@@ -30,6 +35,11 @@
   three JSON libraries this project does not need (NM-10), and an architecture
   test fails the build if anything imports it.
 - `btcd/btcec` and `dcrd/secp256k1` provide secp256k1 and Schnorr signatures.
+
+- `pion/stun` provides the STUN wire format for discovering this node's
+  observed address. The connectivity check that validates a candidate is
+  NostMesh's own (NM-13), authenticated with session key material rather than
+  ICE credentials.
 
 All are permissive and require no cgo.
 

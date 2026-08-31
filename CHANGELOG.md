@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Connectivity discovery: candidates gathered from local interfaces, static
+  configuration and STUN observers, ordered so a node that can connect directly
+  never tells a stranger it exists (M1.4).
+- Authenticated connectivity checks. A candidate is a claim until a
+  challenge/response completes over the exact address and port, and the probe
+  key derives from session material a third party does not have.
+- Address filtering that refuses loopback, multicast, link-local and
+  unspecified targets before a candidate is recorded, so an observer reporting
+  a victim's address cannot make this node send anything there.
+- Separate limits on candidates contributed by third parties, on probes per
+  candidate, and on total attempt time.
+- ADR NM-13 (connectivity discovery and STUN).
+
+### Added
+
 - Session handshake: request → offer → accept, with the ephemeral WireGuard
   public key bound to sender, recipient, session and expiry (M1.3).
 - Deny-by-default allowlist. Actions are separate, so a peer trusted to open a

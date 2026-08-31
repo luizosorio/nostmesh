@@ -39,3 +39,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-10](NM-10-nostr-cryptography.md) | Nostr cryptography and library scope | Accepted |
 | [NM-11](NM-11-file-backed-local-state.md) | File-backed local state | Accepted |
 | [NM-12](NM-12-real-key-derivation.md) | Real key derivation replaces the placeholder | Accepted |
+| [NM-13](NM-13-connectivity-and-stun.md) | Connectivity discovery and STUN | Accepted |
