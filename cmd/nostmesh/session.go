@@ -151,7 +151,12 @@ func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator
 
 	stdout.printf("connecting to %s\n", peer.Short())
 
-	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout)
+	// Progress is printed as it happens. A session spans two hosts and several
+	// layers, and every failure in it looks the same from outside — a wait that
+	// ends empty — so saying what did arrive is most of the diagnosis.
+	trace := func(line string) { stdout.printf("  %s\n", line) }
+
+	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, trace)
 	if err != nil {
 		stderr.printf("nostmesh: %v\n", err)
 		return exitError

@@ -36,6 +36,11 @@ type controlPlane struct {
 	// inbound carries what the relay subscription delivered, already opened.
 	inbound <-chan nostr.Received
 
+	// trace, when set, reports each accepted message. Wiring a session together
+	// spans a transport, a driver and two hosts, and a failure at any point
+	// looks identical from outside: a wait that ends empty.
+	trace func(string)
+
 	mu        sync.Mutex
 	rejected  int
 	reasons   []string
@@ -245,6 +250,11 @@ func (c *controlPlane) Next(ctx context.Context) (orchestrator.Delivery, error) 
 				// the wait ends empty.
 				c.recordRejection(err)
 				continue
+			}
+
+			if c.trace != nil {
+				c.trace(fmt.Sprintf("accepted %s seq=%d session=%s",
+					delivery.Kind, delivery.Seq, abbreviateID(delivery.SessionID)))
 			}
 			return delivery, nil
 		}
