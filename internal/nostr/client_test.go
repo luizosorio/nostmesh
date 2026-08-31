@@ -2,7 +2,6 @@ package nostr
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math/rand"
 	"path/filepath"
@@ -60,16 +59,40 @@ func newTestClient(t *testing.T, fakes []*FakeRelay, minAcceptances int) *Client
 	return client
 }
 
-func testEvent(id string) []byte {
-	raw, _ := json.Marshal(map[string]string{"id": id, "content": "test"})
+// testEvent builds a genuinely signed event carrying the given label.
+//
+// It cannot fabricate an event with a chosen id: a real relay recomputes the id
+// and verifies the signature, so a test that published a hand-made map would
+// only ever prove that the fake is more permissive than Nostr. The label goes
+// in the d tag, and testEventID recovers the resulting id for assertions.
+func testEvent(t *testing.T, label string) []byte {
+	t.Helper()
+
+	_, raw, err := BuildEvent(testSigner(t, 42), 31111, [][]string{{"d", label}}, "test", testNow())
+	if err != nil {
+		t.Fatalf("building test event: %v", err)
+	}
 	return raw
+}
+
+// testEventID returns the id a relay will store the event under.
+func testEventID(t *testing.T, raw []byte) string {
+	t.Helper()
+
+	event, err := ParseEvent(raw)
+	if err != nil {
+		t.Fatalf("parsing test event: %v", err)
+	}
+	return event.ID
 }
 
 func TestPublishFansOutToEveryRelay(t *testing.T) {
 	fakes := testRelays(t, 3)
 	client := newTestClient(t, fakes, 1)
 
-	result, err := client.Publish(context.Background(), "event-1", testEvent("event-1"))
+	event := testEvent(t, "event-1")
+
+	result, err := client.Publish(context.Background(), "event-1", event)
 	if err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
@@ -77,8 +100,12 @@ func TestPublishFansOutToEveryRelay(t *testing.T) {
 	if len(result.AcceptedBy) != 3 {
 		t.Errorf("accepted by %d relays, want 3", len(result.AcceptedBy))
 	}
+
+	// The relay stores the event under its own id, not under whatever label the
+	// caller used to track it.
+	stored := testEventID(t, event)
 	for i, fake := range fakes {
-		if !fake.Has("event-1") {
+		if !fake.Has(stored) {
 			t.Errorf("relay %d did not receive the event", i)
 		}
 	}
@@ -92,7 +119,7 @@ func TestOperatesWithOneRelayDown(t *testing.T) {
 
 	fakes[1].SetDown(true)
 
-	result, err := client.Publish(context.Background(), "event-1", testEvent("event-1"))
+	result, err := client.Publish(context.Background(), "event-1", testEvent(t, "event-1"))
 	if err != nil {
 		t.Fatalf("publishing must succeed with two relays up: %v", err)
 	}
@@ -116,7 +143,7 @@ func TestOneRelayRejectingDoesNotBlockPublication(t *testing.T) {
 
 	fakes[0].SetBehaviour(RelayBehaviour{RejectAll: true, RejectReason: "unknown kind"})
 
-	result, err := client.Publish(context.Background(), "event-1", testEvent("event-1"))
+	result, err := client.Publish(context.Background(), "event-1", testEvent(t, "event-1"))
 	if err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
@@ -136,7 +163,7 @@ func TestPublicationFailsWhenAllRelaysDown(t *testing.T) {
 		fake.SetDown(true)
 	}
 
-	_, err := client.Publish(context.Background(), "event-1", testEvent("event-1"))
+	_, err := client.Publish(context.Background(), "event-1", testEvent(t, "event-1"))
 	if !errors.Is(err, ErrPublishFailed) {
 		t.Fatalf("expected ErrPublishFailed, got: %v", err)
 	}
@@ -150,7 +177,7 @@ func TestMinAcceptancesIsEnforced(t *testing.T) {
 
 	fakes[2].SetDown(true)
 
-	result, err := client.Publish(context.Background(), "event-1", testEvent("event-1"))
+	result, err := client.Publish(context.Background(), "event-1", testEvent(t, "event-1"))
 	if err == nil {
 		t.Fatal("publishing must fail when the acceptance threshold is not met")
 	}
@@ -171,7 +198,7 @@ func TestFailedPublishIsQueuedAndDrained(t *testing.T) {
 
 	entry := Entry{
 		ID:        "event-1",
-		Event:     testEvent("event-1"),
+		Event:     testEvent(t, "event-1"),
 		ExpiresAt: testNow().Add(time.Hour),
 	}
 
@@ -222,7 +249,7 @@ func TestDuplicateDeliveriesAreDeduplicated(t *testing.T) {
 		return LogicalKey{SessionID: "s1", Type: "request", Seq: 0}, nil
 	})
 
-	if _, err := client.Publish(ctx, "event-1", testEvent("event-1")); err != nil {
+	if _, err := client.Publish(ctx, "event-1", testEvent(t, "event-1")); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 
@@ -246,7 +273,7 @@ func TestRelayDuplicationIsAbsorbed(t *testing.T) {
 		return LogicalKey{SessionID: "s1", Type: "request", Seq: 0}, nil
 	})
 
-	if _, err := client.Publish(ctx, "event-1", testEvent("event-1")); err != nil {
+	if _, err := client.Publish(ctx, "event-1", testEvent(t, "event-1")); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 
@@ -271,7 +298,7 @@ func TestConflictingEventsAtSameSequenceAreReported(t *testing.T) {
 	})
 
 	for _, id := range []string{"event-1", "event-2"} {
-		if _, err := client.Publish(ctx, id, testEvent(id)); err != nil {
+		if _, err := client.Publish(ctx, id, testEvent(t, id)); err != nil {
 			t.Fatalf("publishing %s: %v", id, err)
 		}
 	}

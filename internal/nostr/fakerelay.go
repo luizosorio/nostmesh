@@ -139,7 +139,13 @@ func (r *FakeRelay) SetBehaviour(behaviour RelayBehaviour) {
 }
 
 // Publish offers an event to the relay.
-func (r *FakeRelay) Publish(ctx context.Context, id string, raw []byte) error {
+//
+// The id parameter is the caller's own tracking label and is deliberately
+// ignored, exactly as a real relay ignores it: the event is stored and answered
+// for under the id embedded in its bytes. Honouring the caller's label here
+// would let a client that matches on the wrong one pass the suite and then time
+// out against every real relay.
+func (r *FakeRelay) Publish(ctx context.Context, _ string, raw []byte) error {
 	r.mu.Lock()
 	behaviour := r.behaviour
 	down := r.down
@@ -165,6 +171,19 @@ func (r *FakeRelay) Publish(ctx context.Context, id string, raw []byte) error {
 		return fmt.Errorf("%w: %s: %s", ErrRelayRejected, r.url, reason)
 	}
 
+	// A real relay parses the event and refuses anything that is not a valid
+	// NIP-01 event, so the fake must too. Accepting arbitrary bytes here — or
+	// falling back to the caller's id when parsing fails — makes the fake
+	// tolerate what every real relay rejects, and the suite then validates the
+	// implementation against itself rather than against Nostr.
+	parsed, err := ParseEvent(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrRelayRejected, r.url, err)
+	}
+	if err := VerifyEvent(parsed); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrRelayRejected, r.url, err)
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -174,14 +193,7 @@ func (r *FakeRelay) Publish(ctx context.Context, id string, raw []byte) error {
 		return nil
 	}
 
-	// A real relay answers with the event's own id, so the fake does too:
-	// echoing the caller's id would let a client that matches on the wrong one
-	// pass here and fail against every real relay.
-	if embedded, err := eventIDOf(raw); err == nil {
-		id = embedded
-	}
-
-	event := PublishedEvent{ID: id, Raw: raw, Relay: r.url, At: r.clock()}
+	event := PublishedEvent{ID: parsed.ID, Raw: raw, Relay: r.url, At: r.clock()}
 	r.published = append(r.published, event)
 
 	r.deliver(event, behaviour)
