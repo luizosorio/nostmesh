@@ -30,6 +30,9 @@ var (
 	// flowing. Configuration succeeding and the tunnel working are different
 	// claims, and only the second one matters.
 	ErrTunnelNotCarrying = errors.New("tunnel was configured but carries no traffic")
+
+	// ErrSessionDropped reports an established session that stopped carrying.
+	ErrSessionDropped = errors.New("the session stopped carrying traffic")
 )
 
 // Transport is the probe transport the driver hands to the checker.
@@ -231,6 +234,20 @@ type DriverOptions struct {
 	// VerifyTimeout bounds how long to wait for the first data-plane handshake.
 	VerifyTimeout time.Duration
 
+	// HoldPollInterval is how often an established session is checked. It is
+	// far coarser than the first-handshake poll because nothing waits on the
+	// answer: the session is already up, and this only has to notice it ending.
+	HoldPollInterval time.Duration
+
+	// HandshakeStaleAfter is how long without a refreshed handshake means the
+	// session is gone.
+	//
+	// WireGuard rekeys after roughly 120s, and the keepalive keeps traffic
+	// flowing to trigger it, so a live session refreshes well inside this. The
+	// margin is deliberately generous: tearing down a working tunnel is far
+	// worse than noticing a dead one a minute late.
+	HandshakeStaleAfter time.Duration
+
 	// Observers are STUN servers used during gathering.
 	Observers []string
 }
@@ -247,6 +264,12 @@ func (o *DriverOptions) applyDefaults() {
 	}
 	if o.HandshakeTimeout == 0 {
 		o.HandshakeTimeout = 60 * time.Second
+	}
+	if o.HoldPollInterval == 0 {
+		o.HoldPollInterval = 5 * time.Second
+	}
+	if o.HandshakeStaleAfter == 0 {
+		o.HandshakeStaleAfter = 3 * time.Minute
 	}
 	if o.VerifyTimeout == 0 {
 		o.VerifyTimeout = 15 * time.Second
@@ -1061,6 +1084,151 @@ func (d *Driver) establish(ctx context.Context, handshake *session.Handshake,
 	return nil
 }
 
+// Hold keeps an established session up until it stops carrying traffic.
+//
+// Connect returns once the tunnel is confirmed working, but the session is not
+// finished at that point — it is finished when the data plane stops. Without
+// something holding it, the caller treats a working tunnel as a completed unit
+// of work and starts the next attempt, which cannot even bind: the interface
+// from the session that just succeeded still holds the port. The service ends
+// up competing with itself while the tunnel it already built sits there working.
+//
+// Liveness is read from the kernel rather than assumed. WireGuard rekeys after
+// about two minutes of traffic, and the peer spec carries a persistent
+// keepalive, so a live session refreshes its handshake even with no user
+// traffic at all. That is what makes a stale handshake mean "the path died"
+// rather than "nobody used it".
+//
+// onPoll, when set, receives each observation so a caller can report how long
+// the session has been healthy.
+//
+// Returns ctx.Err() when the caller cancels — ordinary shutdown and revocation
+// — and ErrSessionDropped when the session died on its own.
+func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll func(wireguard.PeerState)) error {
+	peerTunnel, known := d.heldTunnelKey(peer)
+	if !known {
+		return fmt.Errorf("%w: %s is not established", ErrSessionNotFound, peer.Short())
+	}
+
+	// Without a keepalive the handshake legitimately stops advancing on an idle
+	// tunnel, and a liveness check would tear down something that works. Losing
+	// the check is far better than that, so the hold degrades to waiting on the
+	// caller instead of guessing.
+	if d.options.KeepaliveInterval <= 0 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ticker := time.NewTicker(d.options.HoldPollInterval)
+	defer ticker.Stop()
+
+	var failures int
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+
+		observed, err := d.observePeer(ctx, peerTunnel)
+		if err != nil {
+			if errors.Is(err, ErrSessionDropped) {
+				return err
+			}
+
+			// A netlink call can fail transiently, and a working tunnel must
+			// not be destroyed by one bad read. Persistent failure is a
+			// different thing and still ends the session.
+			failures++
+			if failures >= observeFailureBudget {
+				return fmt.Errorf("%w: %s could not be observed %d times: %w",
+					ErrSessionDropped, d.options.InterfaceName, failures, err)
+			}
+			continue
+		}
+		failures = 0
+
+		if age := d.clock.Now().Sub(observed.LastHandshake); age > d.options.HandshakeStaleAfter {
+			return fmt.Errorf("%w: last handshake with %s was %s ago",
+				ErrSessionDropped, peerTunnel.Short(), age.Truncate(time.Second))
+		}
+
+		if onPoll != nil {
+			onPoll(observed)
+		}
+	}
+}
+
+// SessionID returns the conversation id for a peer's session, if there is one.
+func (d *Driver) SessionID(peer domain.NostrPublicKey) string {
+	state, known := d.manager.Get(peer)
+	if !known {
+		return ""
+	}
+	return state.SessionID.String()
+}
+
+// heldTunnelKey returns the peer's tunnel key for an established session.
+func (d *Driver) heldTunnelKey(peer domain.NostrPublicKey) (domain.WireGuardPublicKey, bool) {
+	state, known := d.manager.Get(peer)
+	if !known || !state.IsEstablished() || state.TunnelPublicKey == nil {
+		return domain.WireGuardPublicKey{}, false
+	}
+	return *state.TunnelPublicKey, true
+}
+
+// observePeer reads one peer's data-plane state.
+//
+// An interface that vanished and a peer no longer configured on it are both
+// the session ending, and both are reported as such. Any other failure is
+// returned as itself, because the caller tolerates a few of those and must be
+// able to tell them apart.
+func (d *Driver) observePeer(ctx context.Context, peerTunnel domain.WireGuardPublicKey) (wireguard.PeerState, error) {
+	state, err := d.controller.ObserveInterface(ctx, d.options.InterfaceName)
+	if err != nil {
+		if errors.Is(err, wireguard.ErrInterfaceNotFound) {
+			return wireguard.PeerState{}, fmt.Errorf("%w: %s is gone",
+				ErrSessionDropped, d.options.InterfaceName)
+		}
+		return wireguard.PeerState{}, err
+	}
+
+	for _, observed := range state.Peers {
+		if observed.PublicKey != peerTunnel {
+			continue
+		}
+		if !observed.HasHandshake() {
+			return wireguard.PeerState{}, fmt.Errorf("%w: %s has no handshake",
+				ErrSessionDropped, peerTunnel.Short())
+		}
+		return observed, nil
+	}
+
+	return wireguard.PeerState{}, fmt.Errorf("%w: %s is no longer configured on %s",
+		ErrSessionDropped, peerTunnel.Short(), d.options.InterfaceName)
+}
+
+// Release removes what an established session applied.
+//
+// The interface outlives the session's runtime: closing the netlink socket and
+// the UDP transport does not remove it, and it holds the listen port for as
+// long as it exists. Reconnecting therefore has to remove it first, or the next
+// attempt cannot bind — which is precisely the loop this exists to prevent.
+func (d *Driver) Release(ctx context.Context, peer domain.NostrPublicKey) error {
+	// Detached from the caller's context deliberately: this usually runs
+	// because that context was cancelled, and a teardown that gives up on
+	// cancellation is how a port stays claimed after the service stops.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
+	defer cancel()
+
+	err := d.netstate.Remove(ctx, d.options.InterfaceName)
+	_ = d.manager.Close(peer)
+	if err != nil {
+		return fmt.Errorf("removing %s: %w", d.options.InterfaceName, err)
+	}
+	return nil
+}
+
 // awaitHandshake waits for the data plane to carry its first handshake.
 //
 // This is the only evidence that the tunnel works. Everything before it — an
@@ -1108,6 +1276,11 @@ const (
 	// handshakePollInterval is how often the data plane is checked for its
 	// first handshake.
 	handshakePollInterval = 250 * time.Millisecond
+
+	// observeFailureBudget is how many consecutive failed observations a held
+	// session survives. A transient netlink error must not destroy a working
+	// tunnel; a persistent one is the session ending.
+	observeFailureBudget = 3
 
 	// teardownTimeout bounds removing what a failed session applied. It is
 	// short because the work is local, and it exists at all so a teardown

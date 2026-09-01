@@ -18,6 +18,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
+	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
 // service runs sessions with every authorized peer for as long as it is up.
@@ -75,6 +76,11 @@ type peerWorker struct {
 	// session is the conversation to name in a close, kept from the last
 	// established session.
 	session string
+
+	// lastHandshake is when the data plane last refreshed, for the control
+	// socket. It is the quantity the hold acts on, so an operator watching it
+	// approach the limit can see a teardown coming.
+	lastHandshake time.Time
 }
 
 // established reports whether this worker ever held a session.
@@ -83,6 +89,29 @@ func (w *peerWorker) hadSession() (string, bool) {
 	defer w.stateMu.Unlock()
 
 	return w.session, w.established
+}
+
+// recordSession keeps the conversation id a close would have to name.
+//
+// Without it a revocation notice has no session to reference and is silently
+// dropped, so the peer is never told its authorization ended.
+func (w *peerWorker) recordSession(id string) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	if id != "" {
+		w.session = id
+	}
+}
+
+// observeHold notes that the session is still carrying.
+func (w *peerWorker) observeHold(state wireguard.PeerState) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	w.phase = "established"
+	w.reason = ""
+	w.lastHandshake = state.LastHandshake
 }
 
 // observe records where this worker stands.
@@ -121,7 +150,45 @@ func (w *peerWorker) snapshot() controlPeerState {
 	if !w.since.IsZero() {
 		state.Since = w.since.UTC().Format(time.RFC3339)
 	}
+	if !w.lastHandshake.IsZero() {
+		state.HandshakeAge = time.Since(w.lastHandshake).Truncate(time.Second).String()
+	}
 	return state
+}
+
+// recoverHostState removes what an earlier run left behind.
+//
+// Failing here is reported and not fatal: the peer workers surface the same
+// problem as a bind failure with a clearer message, and refusing to start would
+// turn recoverable residue into an outage.
+func (s *service) recoverHostState(ctx context.Context) {
+	instance, cleanup, err := buildOrchestrator(s.cfg)
+	if err != nil {
+		s.log.Warn("could not check for leftover state",
+			slog.String("event", "service.recovery.skipped"),
+			slog.String("error", err.Error()))
+		return
+	}
+	defer cleanup()
+
+	if _, err := instance.Recover(ctx); err != nil {
+		s.log.Warn("journal recovery did not complete",
+			slog.String("event", "service.recovery.failed"),
+			slog.String("error", err.Error()))
+	}
+
+	result, err := instance.Down(ctx)
+	if err != nil {
+		s.log.Warn("leftover state could not be removed",
+			slog.String("event", "service.recovery.failed"),
+			slog.String("error", err.Error()))
+		return
+	}
+	for _, removed := range result.Removed {
+		s.log.Info("removed an interface left by an earlier run",
+			slog.String("event", "service.recovered"),
+			slog.String("interface", removed))
+	}
 }
 
 // runServe is the service entry point.
@@ -181,6 +248,13 @@ func (s *service) run(stdout *output) int {
 	}
 
 	stdout.printf("nostmesh serving as %s; press Ctrl-C to stop\n", s.self.Short())
+
+	// A previous run that was killed leaves its interface behind, and that
+	// interface holds the listen port. Nothing in the journal records it —
+	// the transaction committed — so recovery has to look at the host. A
+	// starting service holds no sessions, so an interface it finds is residue
+	// by definition. Only one this node owns is touched.
+	s.recoverHostState(ctx)
 
 	if err := s.reconcile(ctx, s.cfg); err != nil {
 		s.log.Error("initial peers could not be started",
@@ -451,13 +525,21 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 			w.log.Info("worker stopped", slog.String("event", "peer.worker.stopped"))
 			return
 
+		case errors.Is(err, orchestrator.ErrSessionDropped):
+			// A session that ran and then died is not a failed attempt. Backing
+			// off as though it were would punish a long, healthy session for
+			// ending, so the counter starts over and the peer is picked up
+			// again promptly.
+			consecutive = 0
+			w.observe("reconnecting", err.Error(), attempt)
+			w.log.Warn("session ended",
+				slog.String("event", "session.dropped"),
+				slog.Int64("held_ms", time.Since(started).Milliseconds()),
+				slog.String("reason", err.Error()))
+
 		case err == nil:
 			consecutive = 0
-			w.observe("established", "", attempt)
-			w.recordEstablished()
-			w.log.Info("session established",
-				slog.String("event", "session.established"),
-				slog.Int64("duration_ms", time.Since(started).Milliseconds()))
+			w.observe("connecting", "", attempt)
 
 		default:
 			consecutive++
@@ -494,7 +576,37 @@ func (w *peerWorker) attempt(ctx context.Context, cfg config.Config, answered *o
 
 	// The pair settles which end opens the session. Both are always willing to
 	// answer, which is the whole reason this runs as a service.
-	return runtime.driver.Connect(ctx, w.peer, orchestrator.RoleAuto)
+	if err := runtime.driver.Connect(ctx, w.peer, orchestrator.RoleAuto); err != nil {
+		return err
+	}
+
+	// Recorded before the hold, not after it. A worker cancelled while holding
+	// returns through the cancellation path, and a revocation notice is owed to
+	// exactly the peers that reached this point — deferring it until the hold
+	// ends would withhold it from every one of them.
+	w.recordEstablished()
+	w.recordSession(runtime.driver.SessionID(w.peer))
+
+	// Holding is the point. Connect returning means the tunnel works, not that
+	// the work is over: leaving now would release the port to a peer that is
+	// still using it, and the next attempt would fail to bind against the
+	// interface this one just brought up.
+	//
+	// The relays stay connected for the same reason they were opened — a live
+	// session still has a control plane, and roaming and an inbound close both
+	// arrive through it.
+	err = runtime.driver.Hold(ctx, w.peer, w.observeHold)
+
+	// The interface outlives the runtime and holds the listen port, so it has
+	// to go before anything tries to bind again. This runs on cancellation too:
+	// a service that stopped while leaving the port claimed is the same residue
+	// by another name.
+	if releaseErr := runtime.driver.Release(ctx, w.peer); releaseErr != nil {
+		w.log.Warn("could not release the session",
+			slog.String("event", "session.release.failed"),
+			slog.String("reason", releaseErr.Error()))
+	}
+	return err
 }
 
 // snapshot reports what every worker knows, for the control socket.

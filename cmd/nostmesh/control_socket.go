@@ -47,6 +47,11 @@ type controlPeerState struct {
 	Attempts int    `json:"attempts"`
 	Since    string `json:"since,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+
+	// HandshakeAge is how long ago the data plane last refreshed. It is the
+	// quantity a held session is judged on, so an operator watching it grow can
+	// see a teardown coming rather than learn about it afterwards.
+	HandshakeAge string `json:"handshake_age,omitempty"`
 }
 
 // controlSocketPath returns where the socket lives for a state directory.

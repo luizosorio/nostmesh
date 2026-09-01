@@ -67,14 +67,19 @@ func runState(args []string, stdout, stderr *output) int {
 		return exitOK
 	}
 
-	stdout.printf("\n%-20s %-10s %-14s %8s  %s\n", "PEER", "SHORT", "PHASE", "ATTEMPTS", "SINCE")
+	stdout.printf("\n%-20s %-10s %-14s %8s  %-22s %s\n",
+		"PEER", "SHORT", "PHASE", "ATTEMPTS", "SINCE", "HANDSHAKE")
 	for _, peer := range state.Peers {
 		alias := peer.Alias
 		if alias == "" {
 			alias = "(no alias)"
 		}
-		stdout.printf("%-20s %-10s %-14s %8d  %s\n",
-			truncate(alias, 20), peer.Peer, peer.Phase, peer.Attempts, peer.Since)
+		handshake := peer.HandshakeAge
+		if handshake != "" {
+			handshake += " ago"
+		}
+		stdout.printf("%-20s %-10s %-14s %8d  %-22s %s\n",
+			truncate(alias, 20), peer.Peer, peer.Phase, peer.Attempts, peer.Since, handshake)
 	}
 
 	// The reason a peer is not connected is the point of asking, so it is

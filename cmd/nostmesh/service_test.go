@@ -328,3 +328,38 @@ func TestUnchangedNodeSettingsReportNothing(t *testing.T) {
 		t.Errorf("an unchanged configuration reported %v", changed)
 	}
 }
+
+// A revocation notice has to name the session it closes.
+//
+// notifyRevoked returns early when there is no session id, so a worker that
+// never recorded one is counted as notified while the peer is told nothing. The
+// counter alone cannot see that: it increments before the check.
+func TestARevocationNoticeNamesTheSession(t *testing.T) {
+	peer := testNostrKey(t, 9)
+	cfg, path := writeServiceConfig(t, peer, false)
+
+	svc := testService(t, cfg, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.reconcile(ctx, cfg); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+
+	svc.mu.Lock()
+	worker := svc.workers[peer]
+	svc.mu.Unlock()
+
+	// What a worker records when its session comes up.
+	worker.recordEstablished()
+	worker.recordSession("session-abc")
+
+	session, established := worker.hadSession()
+	if !established {
+		t.Fatal("the worker did not record an established session")
+	}
+	if session == "" {
+		t.Error("no session was recorded, so a revocation names nothing and the peer is never told")
+	}
+}
