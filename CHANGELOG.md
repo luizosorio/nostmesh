@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-09-01
+
+**Housekeeping. No behaviour changes.**
+
+The binary does what 2.0.1 did. This removes code that no longer had a caller and
+comments that described a command which no longer exists — both of which cost a
+reader time and neither of which the running program noticed.
+
+Upgrading is optional and carries no risk; there is nothing here a 2.0.1
+deployment is missing.
+
+### Removed
+
+Three implementations that had been superseded and left behind. Each was a second
+version of something the code already did elsewhere, with no production caller —
+the cost being that a reader could find the wrong one, or a future change be made
+to the copy nothing runs.
+
+- **`domain.Session` and its state machine.** The documented session state
+  machine is implemented by `internal/session`, which is what runs. This left two
+  exported types named `SessionState`: an unused enum and the real one.
+- **`domain.TunnelKeyBinding` and `domain.PeerIdentity`.** NM-06's binding of the
+  WireGuard public key to sender, recipient, session, version, expiry and
+  sequence exists and is enforced as `protocol.TunnelKey`. This was a second
+  implementation of the same requirement.
+- **`STUNObserver`.** Replaced by `SharedObserver`, which holds the session's own
+  socket rather than opening one per query — closing a window in which another
+  process could take the port between observing an address and binding it. The
+  superseded type also had no tests of its own.
+
+`parseSTUNResponse` and the observer errors moved to `observer_shared.go` first:
+the live path used them, so the file could not simply be deleted.
+
+Net: 1,083 lines removed, 94 added.
+
+### Changed
+
+- Comments in `internal/orchestrator` and `cmd/nostmesh` now describe the service
+  and its peer workers rather than `listen`, which 2.0.1 removed.
+- `listenRetryInterval` and `maxListenRetryInterval` are now `retryInterval` and
+  `maxRetryInterval`, moved beside their only caller. Same values, same backoff.
+
+### Kept deliberately
+
+Static analysis reports these as unreachable and they are correct as they are:
+the redaction methods on `SessionKey` (a guard is unreachable precisely when it
+is working), the NIP-19 and derivation functions reached through injected
+function variables that analysis cannot follow, and `SessionManager.Roam` —
+implemented and tested, with no caller yet. Roaming is an MVP 1 acceptance
+criterion, so removing a tested implementation of it would be the wrong kind of
+tidiness; wiring it into the service is a change with its own ADR.
+
 ## [2.0.1] — 2026-09-01
 
 **Two hosts, one behind NAT, hold a tunnel.**
