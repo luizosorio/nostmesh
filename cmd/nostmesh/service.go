@@ -576,6 +576,18 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	}
 }
 
+// negotiationBound is how long one attempt's negotiation may take.
+//
+// The worker itself runs for as long as the operator leaves it running, but a
+// single negotiation must not: every step of it waits on the peer, and a peer
+// that stopped answering mid-negotiation would otherwise hold the attempt open
+// forever. Observed between two real hosts, where both ends sat waiting on each
+// other with nothing left to send.
+//
+// It is generous next to the seconds a negotiation needs, because ending one
+// early costs a reconnect while ending one late costs nothing but patience.
+const negotiationBound = 2 * time.Minute
+
 // roleAfter decides which role to take after an attempt ended.
 //
 // A responder whose wait ended with nobody having called takes the other role
@@ -600,7 +612,7 @@ func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
 		w.log.Debug(line, slog.String("event", "session.trace"))
 	}
 
-	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, orchestrator.Unbounded, trace, answered)
+	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, trace, answered)
 	if err != nil {
 		return err
 	}

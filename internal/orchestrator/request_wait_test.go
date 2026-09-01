@@ -76,3 +76,23 @@ func TestAnUnboundedResponderWaitsForItsCaller(t *testing.T) {
 		t.Errorf("expected the caller's own deadline, got: %v", err)
 	}
 }
+
+// An initiator whose peer never answers gives the attempt back too.
+//
+// Bounding only the responder's wait leaves the mirror image: a node that
+// published a request and got no offer waits on a peer that is not coming.
+// Observed between two real hosts, where the responder had already given up and
+// taken the initiator role while the other end sat waiting for an offer.
+func TestAnInitiatorStopsWaitingForAnOfferThatNeverComes(t *testing.T) {
+	driver, _, _, _, peer := newDriverFixture(t, true)
+	driver.options.HandshakeTimeout = 60 * time.Millisecond
+
+	err := driver.Connect(context.Background(), peer, RoleInitiator)
+
+	if err == nil {
+		t.Fatal("an initiator waited forever for an offer")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected the negotiation bound to end it, got: %v", err)
+	}
+}
