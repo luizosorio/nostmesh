@@ -943,7 +943,7 @@ func decodeChallenge(payload []byte, key connectivity.SessionKey) (connectivity.
 // whether a packet actually moves.
 func TestConfiguredTunnelCarryingNothingFails(t *testing.T) {
 	driver, controller, _, _, peer := newDriverFixture(t, true)
-	makeReachable(t, driver, "198.51.100.10:51820")
+	makeReachable(t, driver)
 
 	// The controller is left with handshakes off: the peer is applied and the
 	// data plane stays silent.
@@ -970,10 +970,34 @@ func TestConfiguredTunnelCarryingNothingFails(t *testing.T) {
 	}
 }
 
+// A tunnel that was configured and carries nothing must be removed, not left.
+//
+// The port it holds is the session's, and the next attempt binds the same one.
+// Leaving the interface turns a single failed session into a peer that can never
+// reconnect: every later attempt fails with "address already in use" against a
+// port its own previous attempt is still holding.
+//
+// Measured between two hosts: the first attempt failed the traffic check, and
+// every attempt after it failed to bind.
+func TestAFailedTrafficCheckRemovesWhatItApplied(t *testing.T) {
+	driver, controller, _, _, peer := newDriverFixture(t, true)
+	makeReachable(t, driver)
+
+	// Handshakes stay off, so the tunnel is configured and carries nothing.
+	err := driver.Connect(context.Background(), peer, RoleInitiator)
+	if !errors.Is(err, ErrTunnelNotCarrying) {
+		t.Fatalf("expected ErrTunnelNotCarrying, got %v", err)
+	}
+
+	if controller.HasInterface("nm0") {
+		t.Error("the interface outlived the session that failed; it still holds the port the next attempt needs")
+	}
+}
+
 // With the data plane carrying traffic, the same path establishes.
 func TestTunnelCarryingTrafficEstablishes(t *testing.T) {
 	driver, controller, transport, publisher, peer := newDriverFixture(t, true)
-	makeReachable(t, driver, "198.51.100.10:51820")
+	makeReachable(t, driver)
 
 	controller.HandshakeOnApply(testFixedNow)
 
@@ -1007,7 +1031,7 @@ func TestTunnelCarryingTrafficEstablishes(t *testing.T) {
 // what the peer sent.
 func TestConfiguredPeerUsesVerifiedEndpointAndLocalAllowedIPs(t *testing.T) {
 	driver, controller, _, _, peer := newDriverFixture(t, true)
-	makeReachable(t, driver, "198.51.100.10:51820")
+	makeReachable(t, driver)
 	controller.HandshakeOnApply(testFixedNow)
 
 	if err := driver.Connect(context.Background(), peer, RoleInitiator); err != nil {
@@ -1040,13 +1064,16 @@ func TestConfiguredPeerUsesVerifiedEndpointAndLocalAllowedIPs(t *testing.T) {
 	}
 }
 
+// reachableAddress is the candidate a scripted peer offers and answers on.
+const reachableAddress = "198.51.100.10:51820"
+
 // makeReachable scripts a peer that negotiates and answers probes.
-func makeReachable(t *testing.T, driver *Driver, address string) {
+func makeReachable(t *testing.T, driver *Driver) {
 	t.Helper()
 
 	driver.receiver = &stubReceiver{messages: []scriptedMessage{
 		offerMessage(t),
-		candidateMessage(address),
+		candidateMessage(reachableAddress),
 	}}
 
 	stub, ok := driver.transport.(*stubTransport)

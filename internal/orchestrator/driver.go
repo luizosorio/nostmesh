@@ -1024,6 +1024,20 @@ func (d *Driver) establish(ctx context.Context, handshake *session.Handshake,
 		return err
 	}
 	if err := d.awaitHandshake(ctx, peerTunnel); err != nil {
+		// The configuration applied cleanly and the data plane still carries
+		// nothing, so what was applied is not wanted. Leaving it would hold the
+		// session's port and make the next attempt fail to bind — a residue
+		// that turns one failed session into a peer that can never reconnect.
+		//
+		// Removal uses a context of its own: the caller's may already be
+		// cancelled, and a teardown that gives up because time ran out is how
+		// state leaks.
+		teardown, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
+		defer cancel()
+
+		if removeErr := d.netstate.Remove(teardown, d.options.InterfaceName); removeErr != nil {
+			return fmt.Errorf("%w; the interface could not be removed either: %w", err, removeErr)
+		}
 		return err
 	}
 
@@ -1094,4 +1108,9 @@ const (
 	// handshakePollInterval is how often the data plane is checked for its
 	// first handshake.
 	handshakePollInterval = 250 * time.Millisecond
+
+	// teardownTimeout bounds removing what a failed session applied. It is
+	// short because the work is local, and it exists at all so a teardown
+	// cannot hang forever holding the port it is trying to release.
+	teardownTimeout = 10 * time.Second
 )
