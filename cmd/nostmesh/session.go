@@ -66,7 +66,9 @@ func runConnect(args []string, stdout, stderr *output) int {
 		return exitError
 	}
 
-	return runSession(cfg, peer, orchestrator.RoleInitiator, *timeout, stdout, stderr)
+	// The pair settles which end opens the session: both are willing to do
+	// either, and the command name is not evidence about the peer.
+	return runSession(cfg, peer, orchestrator.RoleAuto, *timeout, stdout, stderr)
 }
 
 // runListen waits for a peer to open a session with this node.
@@ -133,7 +135,7 @@ func runListen(args []string, stdout, stderr *output) int {
 	}
 
 	if *once {
-		return runSession(cfg, peer, orchestrator.RoleResponder, *timeout, stdout, stderr)
+		return runSession(cfg, peer, orchestrator.RoleAuto, *timeout, stdout, stderr)
 	}
 	return runListener(cfg, peer, *timeout, stdout, stderr)
 }
@@ -231,7 +233,7 @@ func answerOnce(ctx context.Context, cfg config.Config, peer domain.NostrPublicK
 	go runtime.set.Supervise(sessionCtx)
 	go runtime.set.Poll(sessionCtx)
 
-	return runtime.driver.Connect(sessionCtx, peer, orchestrator.RoleResponder)
+	return runtime.driver.Connect(sessionCtx, peer, orchestrator.RoleAuto)
 }
 
 // retryDelay spaces out attempts, growing while they keep failing.

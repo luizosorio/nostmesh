@@ -851,6 +851,50 @@ func newDriverSharing(t *testing.T, answered *AnsweredSessions, script []scripte
 	return driver
 }
 
+// Both ends must reach the same answer about who initiates, without exchanging
+// a message.
+//
+// If both open a session, each refuses the other's as belonging to a different
+// conversation and neither can break the tie. Observed between two real hosts:
+// one bound to session 50e5e074, the other to b2be095e, and each rejected its
+// peer's until both timed out.
+func TestBothEndsAgreeOnWhoInitiates(t *testing.T) {
+	lower := nostrIdentity(t, 1)
+	higher := nostrIdentity(t, 200)
+
+	if lower.String() >= higher.String() {
+		t.Fatalf("fixture is not ordered as assumed: %s vs %s", lower.String()[:8], higher.String()[:8])
+	}
+
+	// Each side computes from its own point of view; the results must be
+	// complementary.
+	fromLower := resolveRole(lower, higher, RoleAuto)
+	fromHigher := resolveRole(higher, lower, RoleAuto)
+
+	if fromLower != RoleInitiator {
+		t.Errorf("the lower key must initiate, got role %d", fromLower)
+	}
+	if fromHigher != RoleResponder {
+		t.Errorf("the higher key must respond, got role %d", fromHigher)
+	}
+	if fromLower == fromHigher {
+		t.Error("both ends chose the same role; neither would answer the other")
+	}
+}
+
+// An explicit role is honoured, so one-shot debugging can still force a side.
+func TestAnExplicitRoleIsNotOverridden(t *testing.T) {
+	lower := nostrIdentity(t, 1)
+	higher := nostrIdentity(t, 200)
+
+	if resolveRole(higher, lower, RoleInitiator) != RoleInitiator {
+		t.Error("an explicitly requested role must be honoured")
+	}
+	if resolveRole(lower, higher, RoleResponder) != RoleResponder {
+		t.Error("an explicitly requested role must be honoured")
+	}
+}
+
 // requestMessage scripts a session request from the peer.
 func requestMessage(t *testing.T) scriptedMessage {
 	t.Helper()

@@ -336,7 +336,36 @@ const (
 
 	// RoleResponder answers one.
 	RoleResponder
+
+	// RoleAuto lets the pair decide, which is what a service wants: both ends
+	// are always willing to do either, and neither can know in advance which
+	// will move first.
+	RoleAuto
 )
+
+// resolveRole settles which end opens the session.
+//
+// Both sides must reach the same answer without exchanging a message, or both
+// open a session and each then refuses the other's as belonging to a different
+// conversation — a deadlock neither side can break, observed between two real
+// hosts where each bound to its own session and rejected its peer's.
+//
+// The rule is a total order on data both ends already share: the node whose
+// Nostr key sorts lower initiates. It is the same device DeriveSessionKey uses
+// to make one key out of two, so the pattern is already established here.
+//
+// The higher-keyed side still answers a request from anyone authorized. A peer
+// that restarted may legitimately open one, and refusing it on the grounds that
+// this node was supposed to initiate would strand both.
+func resolveRole(local, peer domain.NostrPublicKey, requested Role) Role {
+	if requested != RoleAuto {
+		return requested
+	}
+	if local.String() < peer.String() {
+		return RoleInitiator
+	}
+	return RoleResponder
+}
 
 // Connect runs a session to a carrying tunnel, or fails leaving nothing behind.
 //
@@ -346,6 +375,8 @@ const (
 // session is not established until the data plane has actually carried a
 // handshake.
 func (d *Driver) Connect(ctx context.Context, peer domain.NostrPublicKey, role Role) (err error) {
+	role = resolveRole(d.identity, peer, role)
+
 	// Phase 0: authorize. Before a socket is opened, before a relay is told
 	// anything. An unauthorized peer must cost this node nothing and must not
 	// learn that it was asked about.
