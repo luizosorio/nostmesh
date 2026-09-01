@@ -17,6 +17,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
+	"github.com/luizosorio/nostmesh/internal/protocol"
 )
 
 // service runs sessions with every authorized peer for as long as it is up.
@@ -42,6 +43,11 @@ type service struct {
 	// answered is shared by every worker and outlives their attempts, so a
 	// session answered once is not answered again on the next poll.
 	answered *orchestrator.AnsweredSessions
+
+	// noticesSent counts revocation notices attempted. A test asserting the
+	// boundary needs to see the decision, not guess at it from how long a
+	// teardown took.
+	noticesSent int
 }
 
 // peerWorker keeps trying to hold a session with one peer.
@@ -61,6 +67,22 @@ type peerWorker struct {
 	attempts int
 	since    time.Time
 	reason   string
+
+	// established records that a session with this peer once worked, which
+	// decides whether revoking it is announced. See notifyRevoked.
+	established bool
+
+	// session is the conversation to name in a close, kept from the last
+	// established session.
+	session string
+}
+
+// established reports whether this worker ever held a session.
+func (w *peerWorker) hadSession() (string, bool) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	return w.session, w.established
 }
 
 // observe records where this worker stands.
@@ -74,6 +96,14 @@ func (w *peerWorker) observe(phase, reason string, attempts int) {
 	w.phase = phase
 	w.reason = reason
 	w.attempts = attempts
+}
+
+// recordEstablished notes that a session with this peer worked.
+func (w *peerWorker) recordEstablished() {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	w.established = true
 }
 
 // snapshot reports this worker's state.
@@ -305,13 +335,78 @@ func (s *service) stop(peer domain.NostrPublicKey, worker *peerWorker, reason st
 	delete(s.workers, peer)
 	s.mu.Unlock()
 
+	_, established := worker.hadSession()
+
 	worker.log.Warn("peer authorization withdrawn",
 		slog.String("event", "peer.revoked"),
-		slog.String("reason", reason))
+		slog.String("reason", reason),
+		slog.Bool("notified", established))
 
 	worker.cancel()
 	<-worker.done
+
+	if reason == revokedReason && established {
+		s.notifyRevoked(worker)
+	}
 }
+
+// notices counts revocation notices this service attempted, for tests that must
+// confirm the boundary rather than infer it from timing.
+func (s *service) notices() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.noticesSent
+}
+
+// notifyRevoked tells a peer its authorization ended.
+//
+// Only a peer that held a session is told, and the boundary is deliberate.
+// Sending this distinguishes "I revoked you" from "I am offline" from "I never
+// authorized you" — three states an attacker enumerating identities would like
+// to tell apart. A peer with an established session already knew it was
+// authorized, so the message reveals nothing it did not have. A peer that never
+// connected learns something new, and gets silence instead: its attempts then
+// fail exactly as they would for an identity that was never listed.
+//
+// Best effort by design. The peer's own attempts will fail regardless, and a
+// failure to deliver this must not delay tearing the session down.
+func (s *service) notifyRevoked(worker *peerWorker) {
+	s.mu.Lock()
+	s.noticesSent++
+	s.mu.Unlock()
+
+	session, _ := worker.hadSession()
+	if session == "" {
+		// Nothing to name. A close that belongs to no conversation would be
+		// discarded by the peer anyway.
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), revocationNoticeTimeout)
+	defer cancel()
+
+	if err := publishRevocation(ctx, s.cfg, worker.peer, session); err != nil {
+		worker.log.Warn("the peer was not told its authorization ended",
+			slog.String("event", "peer.revoked.notice.failed"),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	worker.log.Info("the peer was told its authorization ended",
+		slog.String("event", "peer.revoked.notice"),
+		slog.String("reason", string(protocol.ClosePolicy)))
+}
+
+const (
+	// revokedReason is the reason recorded when policy withdrew a grant, as
+	// opposed to the service simply stopping.
+	revokedReason = "revoked"
+
+	// revocationNoticeTimeout bounds the courtesy message, which must never
+	// hold up a teardown.
+	revocationNoticeTimeout = 15 * time.Second
+)
 
 // stopAll tears every worker down.
 func (s *service) stopAll() {
@@ -359,6 +454,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 		case err == nil:
 			consecutive = 0
 			w.observe("established", "", attempt)
+			w.recordEstablished()
 			w.log.Info("session established",
 				slog.String("event", "session.established"),
 				slog.Int64("duration_ms", time.Since(started).Milliseconds()))

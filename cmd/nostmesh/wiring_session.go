@@ -14,6 +14,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/nostr"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
+	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
@@ -170,6 +171,64 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 
 	return &sessionRuntime{driver: driver, set: set, plane: plane, cleanup: cleanup}, nil
 }
+
+// publishRevocation tells a peer that its authorization ended.
+//
+// It builds its own relay connection rather than reusing the worker's, because
+// the worker is already gone by the time this runs: revocation deregisters and
+// cancels first, so nothing can still be serving a peer this node has stopped
+// authorizing. The cost is one short-lived connection for a message sent once.
+func publishRevocation(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey, session string) error {
+	nodeIdentity, err := loadIdentity(cfg)
+	if err != nil {
+		return err
+	}
+
+	clock := domain.SystemClock{}
+
+	outbox, err := nostr.NewOutbox(nostr.OutboxOptions{
+		Dir:   filepath.Join(cfg.Node.StateDir, "outbox"),
+		Clock: clock.Now,
+	})
+	if err != nil {
+		return fmt.Errorf("opening outbox: %w", err)
+	}
+
+	set, err := nostr.NewRelaySet(nostr.RelaySetOptions{
+		URLs:   cfg.Node.Relays,
+		Outbox: outbox,
+		Clock:  clock.Now,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = set.Close() }()
+
+	if err := set.Connect(ctx); err != nil {
+		return err
+	}
+
+	plane, err := newControlPlane(ctx, set, nodeIdentity, peer, session, clock.Now)
+	if err != nil {
+		return err
+	}
+
+	// The reason is a stable code with no free-form text. What the peer needs
+	// is to tell this apart from a network failure, and a code does that
+	// without describing this node's internal state.
+	payload := protocol.Payload{
+		Close: &protocol.SessionClose{Reason: protocol.ClosePolicy},
+	}
+
+	return plane.Publish(ctx, protocol.TypeSessionClose, revocationSeq, payload)
+}
+
+// revocationSeq is the sequence a revocation notice carries.
+//
+// The session it closes is over, so the number only has to be one the peer will
+// accept and not collide with a message still in flight. It sits well above any
+// sequence a handshake reaches.
+const revocationSeq = 1000
 
 // driverOptions reads the local interface policy from configuration.
 //

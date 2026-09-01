@@ -139,6 +139,103 @@ func TestRemovingAPeerStopsItsWorker(t *testing.T) {
 	}
 }
 
+// A peer that never connected is told nothing when it is revoked.
+//
+// Sending a close distinguishes "I revoked you" from "I am offline" from "I
+// never authorized you". A peer that held a session already knew it was
+// authorized, so telling it reveals nothing new. A peer that never connected
+// would learn something it could not otherwise determine, and silence is what
+// keeps membership of the allowlist unobservable from outside.
+func TestANeverConnectedPeerIsToldNothing(t *testing.T) {
+	peer := testNostrKey(t, 9)
+	cfg, path := writeServiceConfig(t, peer, false)
+
+	svc := testService(t, cfg, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.reconcile(ctx, cfg); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+
+	// Deliberately no recordEstablished: this peer was authorized and never
+	// reached.
+	revoked, _ := writeServiceConfig(t, peer, true)
+	if err := svc.reconcile(ctx, revoked); err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+
+	if notices := svc.notices(); notices != 0 {
+		t.Errorf("a peer that never connected was told it was revoked (%d notice(s)); being on the allowlist became observable",
+			notices)
+	}
+}
+
+// Stopping for shutdown is not revocation, and must not be announced as one.
+// A peer told its authorization ended would back off hard and stay away, when
+// in fact the service is simply restarting.
+func TestShutdownIsNotAnnouncedAsRevocation(t *testing.T) {
+	peer := testNostrKey(t, 9)
+	cfg, path := writeServiceConfig(t, peer, false)
+
+	svc := testService(t, cfg, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.reconcile(ctx, cfg); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+
+	svc.mu.Lock()
+	worker := svc.workers[peer]
+	svc.mu.Unlock()
+
+	worker.recordEstablished()
+
+	// stopAll passes a reason other than revocation, so no notice goes out.
+	svc.stopAll()
+
+	if notices := svc.notices(); notices != 0 {
+		t.Errorf("stopping announced %d revocation(s) that did not happen; the peer would back off and stay away",
+			notices)
+	}
+}
+
+// Revoking a peer that held a session does announce it. The peer needs to tell
+// this apart from a network failure, or it retries forever against a node that
+// will never answer.
+func TestRevokingAnEstablishedPeerAnnouncesIt(t *testing.T) {
+	peer := testNostrKey(t, 9)
+	cfg, path := writeServiceConfig(t, peer, false)
+
+	svc := testService(t, cfg, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.reconcile(ctx, cfg); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+
+	svc.mu.Lock()
+	worker := svc.workers[peer]
+	svc.mu.Unlock()
+
+	worker.recordEstablished()
+
+	revoked, _ := writeServiceConfig(t, peer, true)
+	if err := svc.reconcile(ctx, revoked); err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+
+	if notices := svc.notices(); notices != 1 {
+		t.Errorf("%d notices sent, expected exactly 1; the peer cannot tell revocation from an outage",
+			notices)
+	}
+}
+
 // Reloading must not disturb a peer it did not change. A healthy tunnel
 // surviving an unrelated edit is the whole point of reloading rather than
 // restarting.
