@@ -42,3 +42,7 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-13](NM-13-connectivity-and-stun.md) | Connectivity discovery and STUN | Accepted |
 | [NM-14](NM-14-relay-websocket-client.md) | Relay WebSocket client | Accepted |
 | [NM-15](NM-15-udp-port-lifecycle.md) | UDP port lifecycle and handover to WireGuard | Accepted |
+| [NM-16](NM-16-session-process-model.md) | Session process model | Accepted |
+| [NM-19](NM-19-identity-import.md) | Adopting an existing Nostr identity | Accepted |
+
+> NM-17 and NM-18 are reserved by work in review and are not listed here yet.

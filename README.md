@@ -114,6 +114,7 @@ nostmesh version
 nostmesh config validate examples/nostmesh.json
 
 nostmesh identity init --state-dir ./state    # generate this node's identity
+nostmesh identity import --state-dir ./state  # or adopt one you already have
 nostmesh peer add --config nostmesh.json ...  # describe the other side
 sudo nostmesh up --config nostmesh.json       # bring the tunnel up
 nostmesh status --config nostmesh.json        # configured vs. observed
@@ -184,10 +185,8 @@ The file keystore writes the key to disk unprotected and is for development
 only. Production deployments are expected to use an external signer that never
 surrenders the private key.
 
-> Nostr public key derivation is currently a development placeholder, not a real
-> secp256k1 key — see [NM-07](docs/adr/NM-07-deferred-nostr-key-derivation.md).
-> Identities created now are not valid Nostr identities and will not carry
-> forward past MVP 1.
+How the identity works, and how to use a Nostr identity you already have, is in
+[docs/identity.md](docs/identity.md).
 
 ## Roadmap
 
