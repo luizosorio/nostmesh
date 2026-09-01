@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-09-01
+
+**Two hosts, one behind NAT, hold a tunnel.**
+
+The version jumps from 0.2.0 by the maintainer's decision. It is not what the
+Semantic Versioning note above would produce on its own, and it is recorded here
+so the gap is deliberate rather than an accident to be reconciled later.
+
+### Added
+
+- `nostmesh serve` — a long-running service holding one session per authorized
+  peer. Either end may open a session and both are always ready to answer;
+  which one opens is settled from the two Nostr keys, so both reach the same
+  answer without exchanging a message. An established session is held and
+  reconnected when it drops, rather than treated as finished work.
+- `nostmesh state` — what a running service is doing, per peer: phase, attempts,
+  how long, the last failure, and the age of the data-plane handshake. Read
+  through a read-only Unix socket at mode 0600.
+- `nostmesh identity import` — adopt a Nostr identity you already have. The key
+  is read from standard input, never from a command-line argument.
+- `nostmesh identity show --format npub` — the public key as other Nostr
+  applications display it, so an imported identity can be checked against the
+  application it came from.
+- `examples/nostmesh.service` — a systemd unit running the service as its own
+  user with `CAP_NET_ADMIN` and nothing else. `systemctl reload` authorizes or
+  revokes a peer without dropping tunnels that are working.
+- `docs/identity.md` — what the node identity is, where it lives, and what to
+  weigh before reusing a personal one.
+
+### Fixed
+
+- **A NAT'd path could not verify.** The probe challenge authenticated over an
+  address the two ends do not share, and the address a peer's traffic actually
+  arrives from was discarded rather than becoming a candidate. Both are fixed;
+  a peer-reflexive candidate is now learned from an authenticated challenge and
+  proved by the ordinary check.
+- **A response arriving after its candidate was re-probed matched nothing.**
+  Outstanding challenges were held one per candidate and overwritten each round,
+  so on a fast path most replies were discarded. They are keyed by nonce now.
+- **The service competed with itself.** `Connect` returning was treated as
+  completed work, so the next attempt could not bind: the interface from the
+  session that had just succeeded still held the listen port.
+- **A mutual drop deadlocked a pair.** Both a responder waiting for a request
+  and an initiator waiting for an offer waited without bound, so after both ends
+  lost a session neither ever called. Both waits are bounded, and a responder
+  that waited for nobody takes the initiating role next time.
+- **Discarding a probe response deadlocked the receiving goroutine.** The
+  counters and the session state shared one mutex, and a Go mutex is not
+  reentrant.
+- **Revocation notices were never sent.** The session id a close must name was
+  read but never recorded, so every notice returned early.
+- **A private key outside the secp256k1 group order was accepted.** The signing
+  library reduces such a value rather than rejecting it, so it silently became a
+  different, valid key.
+- **The secret scanner could not catch a Nostr private key.** Its rule required
+  a separator between the prefix and the key body; a key in the exported form
+  has none.
+- Stale claims in the README and the Nostr tutorial: derivation has not been a
+  placeholder since 0.2.0, and the tutorial told the reader to connect from one
+  side only, which never completed a session.
+
+### Changed
+
+- `listen` is removed. `serve` answers continuously, which is what an ephemeral
+  responder for one named peer was standing in for. `connect`, `sessions` and
+  `disconnect` remain as the one-shot laboratory path.
+
+### Known limitations
+
+- **One peer per node.** The listen port is a single node-level value and the
+  interface name is fixed, so a second worker cannot bind. The service no longer
+  competes with itself; it is not yet multi-peer correct.
+- **No relay fallback.** A direct path that cannot be found fails clearly. The
+  data relay is MVP 3.
+- **No forward secrecy**, unchanged from 0.2.0. See NM-10.
+
+### Decisions
+
+- **NM-17** — probe binding and peer-reflexive candidates, amending NM-13.
+- **NM-18** — the service process model, superseding NM-16.
+- **NM-19** — adopting an existing Nostr identity.
+
 ## [0.2.0] — 2026-08-31
 
 **MVP 1 complete.**
@@ -15,15 +97,23 @@ Two hosts that know each other's Nostr identity negotiate a session through
 relays, verify a direct UDP path, and establish a WireGuard tunnel. No
 coordinator, and no keys exchanged by hand.
 
+> **Corrected 2026-09-01.** This entry claimed more than the release delivered.
+> The end-to-end gate below runs against simulated relays in one process, with a
+> transport that answers probes wherever they are aimed; it proves the protocol
+> under adverse relay behaviour and does not prove NAT traversal. Between two
+> real hosts, one behind NAT, this release established no tunnel. The relay
+> measurements are unaffected — those were made against the real public relays
+> named. Fixed in 2.0.1. The published release notes carry the same correction.
+
 ### Proven, not assumed
 
 - **Public relays accept the protocol.** Verified against `nos.lol` and
   `relay.primal.net`: the experimental kind is accepted with 184–217ms
   publication latency. This is the first evidence for a hypothesis the project
   documentation had only stated.
-- 100 of 100 connections succeed in the end-to-end gate, with one relay of three
-  down, with a relay duplicating deliveries, and with a relay accepting and
-  silently discarding.
+- 100 of 100 connections succeed in the end-to-end gate **against simulated
+  relays**, with one relay of three down, with a relay duplicating deliveries,
+  and with a relay accepting and silently discarding.
 - An address supplied by any third party produces no effect until an
   authenticated challenge/response completes over that exact address and port.
 - A lying observer cannot induce bulk traffic: probes to any single address are
