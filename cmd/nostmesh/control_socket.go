@@ -52,6 +52,15 @@ type controlPeerState struct {
 	// quantity a held session is judged on, so an operator watching it grow can
 	// see a teardown coming rather than learn about it afterwards.
 	HandshakeAge string `json:"handshake_age,omitempty"`
+
+	// Endpoint is where the tunnel currently reaches the peer, and Roams counts
+	// how often that has moved.
+	//
+	// A count that keeps climbing is a path that is not settling. Surfacing it
+	// lets an operator see that while the session is still up, rather than
+	// inferring it afterwards from a session that kept dying.
+	Endpoint string `json:"endpoint,omitempty"`
+	Roams    int    `json:"roams,omitempty"`
 }
 
 // controlSocketPath returns where the socket lives for a state directory.

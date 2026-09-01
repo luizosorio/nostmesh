@@ -82,6 +82,20 @@ func runState(args []string, stdout, stderr *output) int {
 			truncate(alias, 20), peer.Peer, peer.Phase, peer.Attempts, peer.Since, handshake)
 	}
 
+	// Where the tunnel reaches each peer, and how often that has moved. Printed
+	// below the table rather than as another column: it is what an operator
+	// looks at when something is wrong, not on every glance.
+	for _, peer := range state.Peers {
+		if peer.Endpoint == "" {
+			continue
+		}
+		if peer.Roams > 0 {
+			stdout.printf("\n%s: %s (moved %d time(s))\n", peer.Peer, peer.Endpoint, peer.Roams)
+		} else {
+			stdout.printf("\n%s: %s\n", peer.Peer, peer.Endpoint)
+		}
+	}
+
 	// The reason a peer is not connected is the point of asking, so it is
 	// printed in full rather than squeezed into a column.
 	for _, peer := range state.Peers {

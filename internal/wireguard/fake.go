@@ -180,7 +180,15 @@ func (f *FakeController) ApplyPeer(_ context.Context, name string, spec PeerSpec
 		if iface.Peers[i].PublicKey == spec.PublicKey {
 			iface.Peers[i].Endpoint = spec.Endpoint
 			iface.Peers[i].AllowedIPs = spec.AllowedIPs
-			iface.Peers[i].PersistentKeepalive = spec.PersistentKeepalive
+
+			// A zero keepalive leaves the existing one alone, as the netlink
+			// adapter does. Overwriting it here instead would mean a caller
+			// that reapplies a peer without restating the keepalive — which is
+			// what a roam does — silently disables it against this fake and not
+			// against the kernel.
+			if spec.PersistentKeepalive > 0 {
+				iface.Peers[i].PersistentKeepalive = spec.PersistentKeepalive
+			}
 			return nil
 		}
 	}
@@ -203,6 +211,33 @@ func (f *FakeController) ApplyPeer(_ context.Context, name string, spec PeerSpec
 
 	iface.Peers = append(iface.Peers, peer)
 	return nil
+}
+
+// MoveEndpoint relocates a peer's endpoint, modelling a roam.
+//
+// The real kernel does this on its own: it rewrites a peer's endpoint after
+// authenticating a packet from a new address, without the application asking.
+// Without a way to reproduce that, a fake reports the endpoint frozen at
+// whatever was last written to it — so a test of roam detection would only ever
+// observe this project's own write, and would agree with the implementation
+// rather than test it.
+func (f *FakeController) MoveEndpoint(name string, key domain.WireGuardPublicKey, to netip.AddrPort) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	iface, known := f.interfaces[name]
+	if !known {
+		return fmt.Errorf("%w: %s", ErrInterfaceNotFound, name)
+	}
+
+	for i := range iface.Peers {
+		if iface.Peers[i].PublicKey == key {
+			moved := to
+			iface.Peers[i].Endpoint = &moved
+			return nil
+		}
+	}
+	return fmt.Errorf("peer %s is not on %s", key.Short(), name)
 }
 
 // HandshakeOnApply makes applied peers report a completed handshake.

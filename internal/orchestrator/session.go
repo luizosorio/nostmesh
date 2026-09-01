@@ -127,7 +127,18 @@ type SessionManager struct {
 
 	// maxSessions bounds concurrent sessions, since each holds kernel state.
 	maxSessions int
+
+	// minRoamInterval bounds how often a session follows a moved endpoint.
+	minRoamInterval time.Duration
 }
+
+// defaultMinRoamInterval is the hysteresis a session applies to roaming.
+//
+// Comfortably longer than the hold's poll interval, so an oscillating path
+// produces one write per window instead of one per poll, and far shorter than
+// the staleness bound that tears a session down — so waiting out the window can
+// never cost a session that a genuine move would have saved.
+const defaultMinRoamInterval = 15 * time.Second
 
 // SessionManagerOptions configures a SessionManager.
 type SessionManagerOptions struct {
@@ -140,6 +151,15 @@ type SessionManagerOptions struct {
 
 	Clock       domain.Clock
 	MaxSessions int
+
+	// MinRoamInterval is how long a session must hold an endpoint before it may
+	// follow another. A host multihomed between two paths can alternate source
+	// addresses packet by packet, and without a bound every poll would rewrite
+	// kernel state and grow the journal for a tunnel that is working fine.
+	//
+	// The kernel flaps regardless of what this does; the bound protects this
+	// node's own record, not the tunnel.
+	MinRoamInterval time.Duration
 }
 
 // NewSessionManager builds a SessionManager.
@@ -150,17 +170,21 @@ func NewSessionManager(opts SessionManagerOptions) (*SessionManager, error) {
 	if opts.Clock == nil {
 		opts.Clock = domain.SystemClock{}
 	}
+	if opts.MinRoamInterval == 0 {
+		opts.MinRoamInterval = defaultMinRoamInterval
+	}
 	if opts.MaxSessions <= 0 {
 		opts.MaxSessions = 64
 	}
 
 	return &SessionManager{
-		sessions:    make(map[domain.NostrPublicKey]*SessionState),
-		handshakes:  make(map[domain.NostrPublicKey]*session.Handshake),
-		controller:  opts.Controller,
-		netstate:    opts.NetState,
-		clock:       opts.Clock,
-		maxSessions: opts.MaxSessions,
+		sessions:        make(map[domain.NostrPublicKey]*SessionState),
+		handshakes:      make(map[domain.NostrPublicKey]*session.Handshake),
+		controller:      opts.Controller,
+		netstate:        opts.NetState,
+		clock:           opts.Clock,
+		maxSessions:     opts.MaxSessions,
+		minRoamInterval: opts.MinRoamInterval,
 	}, nil
 }
 
@@ -269,6 +293,40 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 			ErrRoamingRejected, candidate.ID, candidate.Status)
 	}
 
+	return m.applyEndpointChange(ctx, peer, candidate.Address, iface, false)
+}
+
+// RecordObservedEndpoint follows an endpoint the kernel has already moved to.
+//
+// WireGuard updates a peer's endpoint on its own, but only after authenticating
+// a packet from the new address under that session's tunnel keys. Whoever can do
+// that holds the tunnel; whoever cannot — anyone spoofing a source address,
+// flooding the port or replaying stale traffic — moves nothing, because the
+// kernel discards what it cannot authenticate.
+//
+// So this records a move that already happened rather than authorizing one, and
+// that is why the candidate check in Roam has no place here. Passing a synthetic
+// candidate marked verified would satisfy that guard by deceiving it, and leave
+// a future reader holding a candidate that nothing verified. See NM-20.
+//
+// Writing it back matters even though the tunnel already works: a stored
+// endpoint the peer has left is a value a later reconciliation would push back
+// into the kernel, undoing a move the kernel got right.
+func (m *SessionManager) RecordObservedEndpoint(ctx context.Context, peer domain.NostrPublicKey,
+	observed netip.AddrPort, iface string,
+) error {
+	return m.applyEndpointChange(ctx, peer, observed, iface, true)
+}
+
+// applyEndpointChange rewrites a live session's endpoint through the journal.
+//
+// Shared by the two ways an endpoint moves — one this node chose after proving
+// the path, one the kernel adopted after authenticating a packet. They differ in
+// what must be true before they may run, which is why that check stays with each
+// caller; they agree entirely on what to do afterwards.
+func (m *SessionManager) applyEndpointChange(ctx context.Context, peer domain.NostrPublicKey,
+	address netip.AddrPort, iface string, observed bool,
+) error {
 	m.mu.Lock()
 	state, known := m.sessions[peer]
 	if !known {
@@ -285,6 +343,19 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 		return fmt.Errorf("%w: session has no bound tunnel key", ErrRoamingRejected)
 	}
 
+	// Hysteresis, for a move the kernel made rather than one this node chose.
+	// A path that oscillates would otherwise rewrite kernel state on every poll
+	// and grow the journal for a tunnel that is working. The record is left
+	// stale deliberately: the next poll past the window still sees the
+	// difference and follows it.
+	if observed && state.LastRoamAt != nil {
+		if since := m.clock.Now().Sub(*state.LastRoamAt); since < m.minRoamInterval {
+			m.mu.Unlock()
+			return fmt.Errorf("%w: %s moved %s ago, minimum interval is %s",
+				ErrRoamingRejected, peer.Short(), since.Truncate(time.Second), m.minRoamInterval)
+		}
+	}
+
 	tunnelKey := *state.TunnelPublicKey
 	previous := state.Endpoint
 	allowed := make([]netip.Prefix, len(state.AllowedIPs))
@@ -292,8 +363,17 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 	m.mu.Unlock()
 
 	// Nothing to do if the endpoint has not actually moved.
-	if previous != nil && *previous == candidate.Address {
+	if previous != nil && *previous == address {
 		return nil
+	}
+
+	// The adapter replaces a peer's AllowedIPs wholesale, so applying an empty
+	// set would strip what the peer is routed rather than leave it alone. A
+	// session that reached ESTABLISHED has them; reaching here without them
+	// means something upstream lost them, and stopping is the safe answer.
+	if len(allowed) == 0 {
+		return fmt.Errorf("%w: session for %s has no allowed prefixes to reapply",
+			ErrRoamingRejected, peer.Short())
 	}
 
 	// The kernel is updated with the same peer key at a new address. The
@@ -305,7 +385,7 @@ func (m *SessionManager) Roam(ctx context.Context, peer domain.NostrPublicKey,
 	// one of them is transactional, attributable and reversible — a direct
 	// write would leave an endpoint no rollback could undo and no audit could
 	// explain.
-	endpoint := candidate.Address
+	endpoint := address
 	if err := m.applyRoam(ctx, iface, wireguard.PeerSpec{
 		PublicKey:  tunnelKey,
 		Endpoint:   &endpoint,

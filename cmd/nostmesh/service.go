@@ -81,6 +81,11 @@ type peerWorker struct {
 	// socket. It is the quantity the hold acts on, so an operator watching it
 	// approach the limit can see a teardown coming.
 	lastHandshake time.Time
+
+	// endpoint is where the tunnel currently reaches the peer, and roams counts
+	// how often it has moved. A count that climbs is a path not settling.
+	endpoint string
+	roams    int
 }
 
 // established reports whether this worker ever held a session.
@@ -112,6 +117,17 @@ func (w *peerWorker) observeHold(state wireguard.PeerState) {
 	w.phase = "established"
 	w.reason = ""
 	w.lastHandshake = state.LastHandshake
+
+	// Counted from what the kernel reports rather than from the manager, so the
+	// number reflects moves that actually happened on the data plane.
+	if state.Endpoint != nil {
+		if moved := state.Endpoint.String(); moved != w.endpoint {
+			if w.endpoint != "" {
+				w.roams++
+			}
+			w.endpoint = moved
+		}
+	}
 }
 
 // observe records where this worker stands.
@@ -150,6 +166,8 @@ func (w *peerWorker) snapshot() controlPeerState {
 	if !w.since.IsZero() {
 		state.Since = w.since.UTC().Format(time.RFC3339)
 	}
+	state.Endpoint = w.endpoint
+	state.Roams = w.roams
 	if !w.lastHandshake.IsZero() {
 		state.HandshakeAge = time.Since(w.lastHandshake).Truncate(time.Second).String()
 	}
