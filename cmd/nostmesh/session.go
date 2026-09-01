@@ -168,6 +168,7 @@ func runListener(cfg config.Config, peer domain.NostrPublicKey,
 
 	stdout.printf("listening for %s; press Ctrl-C to stop\n", peer.Short())
 
+	var consecutive int
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			stdout.printf("stopped\n")
@@ -188,15 +189,22 @@ func runListener(cfg config.Config, peer domain.NostrPublicKey,
 			// listener carries on, because giving up would defeat the point of
 			// waiting.
 			stderr.printf("attempt %d did not complete: %v\n", attempt, err)
+			consecutive++
 		}
 
-		// A short pause keeps a peer that fails instantly and repeatedly from
-		// becoming a spin loop against the relays.
+		if err == nil {
+			consecutive = 0
+		}
+
+		// Backing off matters because some failures do not resolve on their
+		// own. A port already held by another process fails identically every
+		// time, and retrying it twice a second is a spin loop that fills the
+		// log and hammers the relays without ever making progress.
 		select {
 		case <-ctx.Done():
 			stdout.printf("stopped\n")
 			return exitOK
-		case <-time.After(listenRetryInterval):
+		case <-time.After(retryDelay(consecutive)):
 		}
 	}
 }
@@ -226,8 +234,32 @@ func answerOnce(ctx context.Context, cfg config.Config, peer domain.NostrPublicK
 	return runtime.driver.Connect(sessionCtx, peer, orchestrator.RoleResponder)
 }
 
-// listenRetryInterval separates one attempt from the next.
-const listenRetryInterval = 2 * time.Second
+// retryDelay spaces out attempts, growing while they keep failing.
+//
+// A peer that is simply not ready yet costs one short pause; a condition that
+// cannot resolve — a port held by another process, a configuration the operator
+// must fix — backs off to a rate that keeps the failure visible in the log
+// without drowning it.
+func retryDelay(consecutive int) time.Duration {
+	if consecutive <= 0 {
+		return listenRetryInterval
+	}
+
+	delay := listenRetryInterval << min(consecutive-1, maxRetryDoublings)
+	return min(delay, maxListenRetryInterval)
+}
+
+const (
+	// listenRetryInterval separates one attempt from the next.
+	listenRetryInterval = 2 * time.Second
+
+	// maxListenRetryInterval caps the backoff, so a listener still notices a
+	// peer that becomes ready after a long outage.
+	maxListenRetryInterval = 30 * time.Second
+
+	// maxRetryDoublings bounds the shift, so the delay cannot overflow.
+	maxRetryDoublings = 8
+)
 
 // runSession builds the runtime and drives one session to a carrying tunnel.
 //
