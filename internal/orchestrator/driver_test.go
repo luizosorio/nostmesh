@@ -14,7 +14,6 @@ import (
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
-	"github.com/luizosorio/nostmesh/internal/nostr"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
@@ -618,122 +617,97 @@ func TestResponderDoesNotAnswerASessionTwice(t *testing.T) {
 	}
 }
 
-// Considering a request and passing it over must not strike its session off.
+// Asking whether a session was answered must not record that it was.
 //
-// The responder examines several requests before committing to one. If merely
-// looking marked them, a session it declined this time — because a newer one
-// superseded it, or because the attempt failed — could never be answered later,
-// and the responder would sit idle with a live request in front of it.
+// The responder consults this on every request the relay hands it, including
+// ones it goes on to reject for other reasons. If merely asking marked them, a
+// session declined once could never be answered later, and the responder would
+// sit idle with a live request in front of it.
 //
-// Measured against real relays: the responder settled on a request from the
-// previous run, that attempt failed, and the current request was already struck
-// off by the act of comparing the two.
-func TestConsideringARequestDoesNotStrikeOffItsSession(t *testing.T) {
+// Measured against real relays: the responder settled on a request from a
+// previous run, that attempt failed, and the session it should have answered had
+// been struck off by the act of comparing the two.
+func TestAskingDoesNotRecordAnAttempt(t *testing.T) {
 	driver, _, _, _, _ := newDriverFixture(t, true)
 
-	older := requestMessage(t)
-	older.session = strings.Repeat("44", 32)
-	older.createdAt = testFixedNow.Add(-time.Second)
-
-	newer := requestMessage(t)
-	newer.session = strings.Repeat("55", 32)
-	newer.createdAt = testFixedNow
-
-	driver.receiver = &stubReceiver{messages: []scriptedMessage{older, newer}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	chosen, err := driver.awaitRequest(ctx)
-	if err != nil {
-		t.Fatalf("awaiting a request: %v", err)
-	}
-	if chosen.sessionID.String() != newer.session {
-		t.Fatalf("answered %s, expected the newer %s", chosen.sessionID.String()[:8], newer.session[:8])
+	var session domain.SessionID
+	for i := range session {
+		session[i] = byte(i + 1)
 	}
 
-	// The one that lost the comparison was never answered, so it must remain
-	// available: the peer may retry it, and a responder that had struck it off
-	// would ignore a request it is perfectly able to serve.
-	loser, err := domain.ParseSessionID(older.session)
-	if err != nil {
-		t.Fatalf("parsing: %v", err)
+	if driver.alreadyTried(session) {
+		t.Fatal("a session nothing has answered must not be reported as tried")
 	}
-	if driver.alreadyTried(loser) {
-		t.Error("a request that was considered and passed over was struck off; the peer could never retry it")
+
+	// Asking again must still say no: the first question cannot have been an
+	// answer.
+	if driver.alreadyTried(session) {
+		t.Error("asking whether a session was answered recorded it as answered")
+	}
+
+	driver.recordAttempt(session)
+	if !driver.alreadyTried(session) {
+		t.Error("a recorded attempt must be remembered")
 	}
 }
 
-// A responder answers requests addressed to it while it was listening, not
-// requests it finds lying around. A relay replays its stored backlog before any
-// live traffic, so the first request to arrive is routinely one the initiator
-// abandoned minutes ago.
+// A responder answers the first request it has not already answered.
 //
-// Answering it strands both sides: the offer names a session the initiator is no
-// longer running, and each waits out its timeout. Measured against real relays,
-// where a responder answered a session from an earlier run while the initiator
-// was on a new one.
-func TestResponderIgnoresRequestsPublishedBeforeItListened(t *testing.T) {
+// This is what a continuously running listener makes possible: it is already
+// subscribed when a request is published, so requests arrive in order and no
+// heuristic is needed to tell a live one from a stored one.
+func TestResponderAnswersTheFirstUnansweredRequest(t *testing.T) {
 	driver, _, _, _, _ := newDriverFixture(t, true)
 
-	// Old enough to sit outside the clock-skew tolerance, which is what
-	// separates "published before I started" from "published just now by a host
-	// whose clock disagrees with mine".
-	stale := requestMessage(t)
-	stale.session = strings.Repeat("11", 32)
-	stale.createdAt = testFixedNow.Add(-protocol.MaxClockSkew - time.Minute)
+	first := requestMessage(t)
+	first.session = strings.Repeat("44", 32)
 
-	live := requestMessage(t)
-	live.session = strings.Repeat("22", 32)
-	live.createdAt = testFixedNow
+	second := requestMessage(t)
+	second.session = strings.Repeat("55", 32)
 
-	// The stale one arrives first, as a replayed backlog does.
-	driver.receiver = &stubReceiver{messages: []scriptedMessage{stale, live}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	chosen, err := driver.awaitRequest(ctx)
-	if err != nil {
-		t.Fatalf("awaiting a request: %v", err)
-	}
-
-	if chosen.sessionID.String() != live.session {
-		t.Errorf("answered session %s, expected the live one %s",
-			chosen.sessionID.String()[:8], live.session[:8])
-	}
-}
-
-// An initiator must skip an offer made before it published its request. The
-// mirror of the responder's rule: a relay replays stored offers, so the first to
-// arrive answers a session this node has since abandoned.
-//
-// The handshake would refuse it anyway — the offer hash would not match — but
-// refusing is not enough. The live answer is behind it, and an initiator that
-// stopped at the first offer would time out with its own answer already
-// published.
-func TestInitiatorSkipsAnOfferMadeBeforeItAsked(t *testing.T) {
-	driver, _, _, _, _ := newDriverFixture(t, true)
-
-	stale := offerMessage(t)
-	stale.createdAt = testFixedNow.Add(-protocol.MaxClockSkew - time.Minute)
-
-	live := offerMessage(t)
-	live.createdAt = testFixedNow
-
-	driver.receiver = &stubReceiver{messages: []scriptedMessage{stale, live}}
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{first, second}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	offer, err := driver.awaitOffer(ctx, testFixedNow)
+	chosen, err := driver.awaitRequest(ctx)
 	if err != nil {
-		t.Fatalf("awaiting an offer: %v", err)
+		t.Fatalf("awaiting a request: %v", err)
+	}
+	if chosen.sessionID.String() != first.session {
+		t.Errorf("answered %s, expected the first %s", chosen.sessionID.String()[:8], first.session[:8])
+	}
+}
+
+// A session already answered is skipped, so a relay handing the same stored
+// request back on every poll does not make the responder answer it forever.
+func TestResponderSkipsASessionItAlreadyAnswered(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	repeated := requestMessage(t)
+	repeated.session = strings.Repeat("66", 32)
+
+	fresh := requestMessage(t)
+	fresh.session = strings.Repeat("77", 32)
+
+	// The same request arrives twice, as a poll would deliver it, followed by a
+	// new one.
+	driver.receiver = &stubReceiver{messages: []scriptedMessage{repeated, repeated, fresh}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := driver.awaitRequest(ctx); err != nil {
+		t.Fatalf("first request: %v", err)
 	}
 
-	if !offer.CreatedAt.Equal(live.createdAt) {
-		t.Errorf("took the offer made at %s, expected the one made at %s",
-			offer.CreatedAt.Format(time.TimeOnly), live.createdAt.Format(time.TimeOnly))
+	next, err := driver.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if next.sessionID.String() != fresh.session {
+		t.Errorf("answered %s again, expected to move on to %s",
+			next.sessionID.String()[:8], fresh.session[:8])
 	}
 }
 
@@ -752,52 +726,6 @@ func TestInitiatorAcceptsAnOfferFromASkewedResponder(t *testing.T) {
 
 	if _, err := driver.awaitOffer(ctx, testFixedNow); err != nil {
 		t.Errorf("an offer from a responder running behind must be accepted: %v", err)
-	}
-}
-
-// A request from a peer whose clock runs behind must still be answered. The
-// tolerance that admits it is the same one the protocol applies to every other
-// timestamp, so a message this accepts is one the validator would accept too.
-func TestResponderAnswersAPeerWhoseClockIsBehind(t *testing.T) {
-	driver, _, _, _, _ := newDriverFixture(t, true)
-
-	skewed := requestMessage(t)
-	skewed.session = strings.Repeat("33", 32)
-	skewed.createdAt = testFixedNow.Add(-protocol.MaxClockSkew + time.Minute)
-
-	driver.receiver = &stubReceiver{messages: []scriptedMessage{skewed}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	chosen, err := driver.awaitRequest(ctx)
-	if err != nil {
-		t.Fatalf("a peer running behind must still be answered: %v", err)
-	}
-	if chosen.sessionID.String() != skewed.session {
-		t.Errorf("answered %s, expected %s", chosen.sessionID.String()[:8], skewed.session[:8])
-	}
-}
-
-// The settling window must outlast the interval at which the relay set polls.
-//
-// A responder usually starts before its peer, so a request left over from an
-// earlier attempt arrives immediately from the relay's store while the live one
-// appears only on a later poll. A window shorter than that interval closes
-// before the message it exists to wait for could arrive, and the responder
-// answers the stale request every time.
-//
-// Measured against real relays, where a 3-second window and a 3-second poll
-// interval raced and the stale request won.
-func TestTheSettlingWindowOutlastsThePollInterval(t *testing.T) {
-	// Several intervals, not merely more than one: a poll can be missed, and a
-	// window that covers exactly one leaves no margin for the relay's own
-	// latency.
-	minimum := 2 * nostr.PollInterval()
-
-	if requestSettleWindow < minimum {
-		t.Errorf("the settling window is %s but polling runs every %s; a stale request would win the race",
-			requestSettleWindow, nostr.PollInterval())
 	}
 }
 

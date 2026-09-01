@@ -188,7 +188,10 @@ func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
 		// side runs, so a shorter internal bound would make it give up while the
 		// operator was still waiting — which is exactly what it looked like: a
 		// listener exiting long before its own deadline.
-		HandshakeTimeout: timeout,
+		//
+		// Zero from the operator means no deadline, which the driver expresses
+		// as Unbounded — its own zero would take the default bound instead.
+		HandshakeTimeout: handshakeBound(timeout),
 	}
 
 	if cfg.Node.OverlayAddress != "" {
@@ -219,6 +222,14 @@ func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
 			peer.Short())
 	}
 	return options, nil
+}
+
+// handshakeBound converts an operator timeout into the driver's bound.
+func handshakeBound(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return orchestrator.Unbounded
+	}
+	return timeout
 }
 
 // loadIdentity reads this node's Nostr identity.

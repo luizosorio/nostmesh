@@ -76,19 +76,28 @@ func runConnect(args []string, stdout, stderr *output) int {
 // own. It is deliberately not a daemon: a daemon needs a control socket, a pid
 // file and an IPC surface, none of which the current acceptance criteria ask
 // for. Supervision belongs to systemd or a container runtime.
+//
+// By default it keeps listening after a session ends, because the peer that
+// will connect may not be ready for hours. That is also what makes the
+// behaviour correct rather than merely convenient: a listener that was already
+// running when a request was published sees it arrive, in order, and never has
+// to guess which of several stored requests is the live one.
 func runListen(args []string, stdout, stderr *output) int {
 	flags := flag.NewFlagSet("listen", flag.ContinueOnError)
 	flags.SetOutput(stderr.w)
 	configPath := flags.String("config", "", "path to the configuration file (required)")
 	peerKey := flags.String("peer", "", "peer's Nostr public key, hex (required)")
-	timeout := flags.Duration("timeout", sessionTimeout, "how long to wait for the session to establish")
+	timeout := flags.Duration("timeout", 0,
+		"give up after this long; zero keeps listening indefinitely")
+	once := flags.Bool("once", false, "exit after the first session ends, successfully or not")
 
 	flags.Usage = func() {
 		stderr.printf("Usage: nostmesh listen --config <path> --peer <pubkey>\n\n" +
 			"Wait for a peer to open a session, and answer it.\n\n" +
-			"The peer must already be authorized: local policy denies by default.\n" +
-			"This runs in the foreground until the tunnel is established or the\n" +
-			"timeout expires.\n\nFlags:\n")
+			"The peer must already be authorized: local policy denies by default.\n\n" +
+			"This runs in the foreground and keeps listening, so the peer may\n" +
+			"connect at any time — minutes or days later. It exits on SIGINT or\n" +
+			"SIGTERM; run it under systemd or a container runtime to keep it up.\n\nFlags:\n")
 		flags.PrintDefaults()
 	}
 
@@ -123,8 +132,95 @@ func runListen(args []string, stdout, stderr *output) int {
 		return exitError
 	}
 
-	return runSession(cfg, peer, orchestrator.RoleResponder, *timeout, stdout, stderr)
+	if *once {
+		return runSession(cfg, peer, orchestrator.RoleResponder, *timeout, stdout, stderr)
+	}
+	return runListener(cfg, peer, *timeout, stdout, stderr)
 }
+
+// runListener answers sessions until it is asked to stop.
+//
+// Each session gets its own runtime, so a failed attempt leaves nothing behind
+// for the next one: the relay set, the UDP port and the netlink socket are all
+// released before another is opened. That costs a reconnection per attempt and
+// buys the guarantee that one session cannot inherit another's state.
+func runListener(cfg config.Config, peer domain.NostrPublicKey,
+	timeout time.Duration, stdout, stderr *output,
+) int {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+
+	go func() {
+		<-stop
+		cancel()
+	}()
+
+	stdout.printf("listening for %s; press Ctrl-C to stop\n", peer.Short())
+
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			stdout.printf("stopped\n")
+			return exitOK
+		}
+
+		err := answerOnce(ctx, cfg, peer, timeout, stdout)
+		switch {
+		case ctx.Err() != nil:
+			stdout.printf("stopped\n")
+			return exitOK
+		case err == nil:
+			stdout.printf("tunnel established with %s\n", peer.Short())
+			stdout.printf("still listening; the peer may reconnect\n")
+		default:
+			// A failed attempt is ordinary here: the peer may have gone away
+			// mid-handshake, or not be ready yet. It is reported and the
+			// listener carries on, because giving up would defeat the point of
+			// waiting.
+			stderr.printf("attempt %d did not complete: %v\n", attempt, err)
+		}
+
+		// A short pause keeps a peer that fails instantly and repeatedly from
+		// becoming a spin loop against the relays.
+		select {
+		case <-ctx.Done():
+			stdout.printf("stopped\n")
+			return exitOK
+		case <-time.After(listenRetryInterval):
+		}
+	}
+}
+
+// answerOnce builds a runtime, answers one session, and releases everything.
+func answerOnce(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
+	timeout time.Duration, stdout *output,
+) error {
+	sessionCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		sessionCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	trace := func(line string) { stdout.printf("  %s\n", line) }
+
+	runtime, err := buildSessionRuntime(sessionCtx, cfg, peer, timeout, trace)
+	if err != nil {
+		return err
+	}
+	defer runtime.cleanup()
+
+	go runtime.set.Supervise(sessionCtx)
+	go runtime.set.Poll(sessionCtx)
+
+	return runtime.driver.Connect(sessionCtx, peer, orchestrator.RoleResponder)
+}
+
+// listenRetryInterval separates one attempt from the next.
+const listenRetryInterval = 2 * time.Second
 
 // runSession builds the runtime and drives one session to a carrying tunnel.
 //
@@ -134,8 +230,14 @@ func runListen(args []string, stdout, stderr *output) int {
 func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator.Role,
 	timeout time.Duration, stdout, stderr *output,
 ) int {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if timeout > 0 {
+		var timed context.CancelFunc
+		ctx, timed = context.WithTimeout(ctx, timeout)
+		defer timed()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

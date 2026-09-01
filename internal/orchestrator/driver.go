@@ -144,6 +144,11 @@ type DriverOptions struct {
 	KeepaliveInterval time.Duration
 
 	// HandshakeTimeout bounds the control-plane negotiation.
+	//
+	// Negative means unbounded: a listener may legitimately wait days for a peer
+	// to be ready, and the only thing that should end that wait is the caller
+	// cancelling its context. Zero takes the default, so an unset field still
+	// gets a sensible bound.
 	HandshakeTimeout time.Duration
 
 	// VerifyTimeout bounds how long to wait for the first data-plane handshake.
@@ -510,6 +515,10 @@ func (d *Driver) awaitOffer(ctx context.Context, requestedAt time.Time) (Deliver
 // that consumes it — a candidate update while the responder is still waiting for
 // an accept, say. Discarding it would lose it permanently, and both sides would
 // then wait out their timeouts for something that already came and went.
+// Unbounded is the HandshakeTimeout value meaning "wait as long as the caller's
+// context allows".
+const Unbounded = -1 * time.Second
+
 func (d *Driver) awaitMessage(ctx context.Context, want protocol.MessageType) (Delivery, error) {
 	d.pendingMu.Lock()
 	if held, waiting := d.pending[want]; waiting && len(held) > 0 {
@@ -520,8 +529,11 @@ func (d *Driver) awaitMessage(ctx context.Context, want protocol.MessageType) (D
 	}
 	d.pendingMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, d.options.HandshakeTimeout)
-	defer cancel()
+	if d.options.HandshakeTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.options.HandshakeTimeout)
+		defer cancel()
+	}
 
 	for {
 		delivery, err := d.receiver.Next(ctx)
@@ -578,92 +590,35 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	// both sides wait out their timeouts having exchanged messages that could
 	// never match.
 	//
-	// A responder answers requests made while it was listening, and among those
-	// the newest.
+	// A responder answers the first request it has not already answered.
 	//
-	// Both halves are needed. The age bound rejects a request from an attempt
-	// abandoned long ago; the settling window handles the case the age bound
-	// cannot, where an initiator retried seconds before this node started and
-	// the relay still holds the previous attempt as live. Measured against real
-	// relays, where a responder answered a request from the run before while
-	// the initiator was already on its next one.
+	// It can be that simple because a listener runs continuously: it is already
+	// subscribed when a request is published, so requests arrive in order and
+	// the one in front is the current one. What made this hard before was a
+	// listener that started, found several stored requests at once, and had to
+	// guess which was live — a guess no timestamp can settle, because the gap
+	// between a stale request and a fresh one is far smaller than the clock skew
+	// two healthy hosts may have.
 	//
-	// The window is measured from the first request's arrival, and against the
-	// system clock, because it bounds a wait on a real socket. An injected clock
-	// belongs to the domain's reasoning about validity, not to how long a
-	// goroutine sleeps.
-	//
-	// The age bound is the protocol's clock-skew tolerance, which is the widest
-	// it can safely be: a peer running that far behind is still healthy, and
-	// rejecting it would refuse a legitimate request. It is deliberately not
-	// narrower — a tighter bound would be measuring recency, and two hosts have
-	// no shared clock to measure recency against.
-	//
-	// It therefore cannot separate a request published a minute ago from the
-	// live one, and does not try. That is what the settling window is for.
-	notBefore := d.clock.Now().Add(-protocol.MaxClockSkew)
-
-	var (
-		newest   *pendingRequest
-		deadline time.Time
-	)
-
+	// The peer's own retries do the rest. An initiator that gets no answer
+	// publishes again, and because a request is keyed by recipient the relay
+	// keeps only the newest — so a responder that answered a dead session and
+	// failed will find the live one waiting on its next attempt.
 	for {
-		remaining := time.Duration(0)
-		if newest != nil {
-			remaining = time.Until(deadline)
-			if remaining <= 0 {
-				return d.settle(newest)
-			}
-		}
-
-		request, err := d.readRequest(ctx, newest != nil, remaining)
+		request, err := d.readRequest(ctx)
 		if err != nil {
-			if newest != nil {
-				// The window closing with something in hand is the expected
-				// end, not a failure.
-				return d.settle(newest)
-			}
 			return nil, err
 		}
 
-		// Already answered: a relay hands stored requests back on every poll,
-		// so without this the same abandoned session is answered forever.
+		// A relay hands stored requests back on every poll, so without this the
+		// same session would be answered again on each one.
 		if d.alreadyTried(request.sessionID) {
 			continue
 		}
 
-		// Published before this node began listening by more than two healthy
-		// clocks could disagree, so it belongs to a conversation this node was
-		// not part of.
-		if request.createdAt.Before(notBefore) {
-			continue
-		}
-
-		if newest == nil {
-			deadline = time.Now().Add(requestSettleWindow)
-			newest = request
-			continue
-		}
-		if request.createdAt.After(newest.createdAt) {
-			newest = request
-		}
+		return d.settle(request)
 	}
 }
-
-// requestSettleWindow is how long a responder keeps looking for a newer request
-// after the first acceptable one arrives.
-//
-// This is what separates a live request from one published minutes ago, because
-// the age bound cannot: that bound is sized for clock skew, and a tolerance wide
-// enough for two healthy hosts is far wider than the gap between a stale request
-// and a fresh one.
-//
-// It must outlast the poll interval. A responder typically starts before its
-// peer, so the stale request arrives immediately from the relay's store while
-// the live one appears on a later poll — a window shorter than that interval
-// would close before the message it exists to wait for could arrive.
-const requestSettleWindow = 12 * time.Second
 
 // settle binds the session the responder chose.
 //
@@ -717,16 +672,7 @@ func (d *Driver) recordAttempt(sessionID domain.SessionID) {
 // consults transport state. That is what lets this run in a loop over several
 // candidate requests without the transport binding itself to whichever the
 // relay happened to replay first.
-func (d *Driver) readRequest(ctx context.Context, bounded bool, within time.Duration) (*pendingRequest, error) {
-	// Before anything acceptable has arrived the wait is unbounded: a responder
-	// may legitimately sit idle for as long as the operator allows. Once one is
-	// in hand the wait is short, because it is only looking for a newer one.
-	if bounded {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, within)
-		defer cancel()
-	}
-
+func (d *Driver) readRequest(ctx context.Context) (*pendingRequest, error) {
 	delivery, err := d.awaitMessage(ctx, protocol.TypeSessionRequest)
 	if err != nil {
 		return nil, err
