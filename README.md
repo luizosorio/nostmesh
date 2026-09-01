@@ -120,8 +120,23 @@ nostmesh status --config nostmesh.json        # configured vs. observed
 sudo nostmesh down --config nostmesh.json     # remove what NostMesh applied
 ```
 
+That is the manual path, where the operator supplies the endpoint. To have two
+nodes find each other over Nostr instead, run the service on both:
+
+```bash
+sudo nostmesh serve --config nostmesh.json      # hold a session with every
+                                                # authorized peer
+nostmesh state --config nostmesh.json           # what the service is doing
+```
+
+Either side may open a session at any time and the other answers, so `serve` runs
+until it is stopped. `examples/nostmesh.service` runs it under systemd, where
+`systemctl reload` authorizes or revokes a peer without dropping the tunnels that
+are working.
+
 For a walk-through of establishing a tunnel between two hosts, see the
-[manual tunnel tutorial](docs/tutorial-manual-tunnel.md).
+[manual tunnel tutorial](docs/tutorial-manual-tunnel.md) and the
+[Nostr tunnel tutorial](docs/tutorial-nostr-tunnel.md).
 
 Configuration is declarative and validated before it can influence anything.
 Invalid input fails with a message naming the field and stating what is

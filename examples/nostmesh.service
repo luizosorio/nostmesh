@@ -43,6 +43,12 @@ ConfigurationDirectory=nostmesh
 # have it read out of one.
 LimitCORE=0
 
+# Anything this service creates is private to it. The control socket sets its own
+# mode explicitly and verifies it afterwards, because a umask can only take
+# permissions away — but the keystore and the journal are covered by this, and a
+# default that leaves them world-readable is not one to inherit.
+UMask=0077
+
 # Filesystem: nothing outside its own directories is writable, and the rest of
 # the system is invisible where it can be.
 ProtectSystem=strict
