@@ -669,6 +669,14 @@ func (d *Driver) awaitAccept(ctx context.Context, offeredAt time.Time, offerHash
 	}
 }
 
+// Unbounded is the HandshakeTimeout meaning the wait ends only when the
+// caller's context does.
+//
+// A service holds a peer worker for as long as the operator leaves it running,
+// and the peer may be hours away from being ready. Nothing shorter than the
+// caller's own cancellation should end that wait.
+const Unbounded = -1 * time.Second
+
 // awaitMessage waits for one message type, holding onto the others.
 //
 // Messages of other types are kept rather than dropped. Relays reorder, and the
@@ -676,10 +684,6 @@ func (d *Driver) awaitAccept(ctx context.Context, offeredAt time.Time, offerHash
 // that consumes it — a candidate update while the responder is still waiting for
 // an accept, say. Discarding it would lose it permanently, and both sides would
 // then wait out their timeouts for something that already came and went.
-// Unbounded is the HandshakeTimeout value meaning "wait as long as the caller's
-// context allows".
-const Unbounded = -1 * time.Second
-
 func (d *Driver) awaitMessage(ctx context.Context, want protocol.MessageType) (Delivery, error) {
 	d.pendingMu.Lock()
 	if held, waiting := d.pending[want]; waiting && len(held) > 0 {

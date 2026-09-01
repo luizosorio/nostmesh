@@ -194,11 +194,10 @@ type DecodedProbe struct {
 	Observed netip.AddrPort
 }
 
-// DecodeProbe parses and authenticates a probe.
+// DecodeChallenge parses and authenticates a challenge.
 //
-// The peer address is the address the packet came from, or is going to, and it
-// is part of what is authenticated. A probe that arrives from an address other
-// than the one it was addressed to fails here.
+// No address is involved: a challenge authenticates session membership and
+// freshness, and nothing about the path it travelled. See EncodeChallenge.
 func DecodeChallenge(raw []byte, key SessionKey) (DecodedProbe, error) {
 	parsed, err := parseProbe(raw)
 	if err != nil {
@@ -335,27 +334,6 @@ func authenticateUnbound(key SessionKey, kind byte, nonce, body []byte) []byte {
 	mac.Write([]byte{kind})
 	mac.Write(nonce)
 	mac.Write(body)
-
-	return mac.Sum(nil)
-}
-
-// authenticate computes the tag over a probe's contents and its address.
-func authenticate(key SessionKey, kind byte, nonce, body []byte, addr netip.AddrPort) []byte {
-	mac := hmac.New(sha256.New, key[:])
-	mac.Write([]byte{kind})
-	mac.Write(nonce)
-	mac.Write(body)
-
-	// The address is included so a probe is only valid for the path it was
-	// made for.
-	address := addr.Addr().Unmap().As16()
-	mac.Write(address[:])
-
-	// Big-endian, matching how a port appears on the wire, so both sides
-	// authenticate the same bytes.
-	port := make([]byte, 2)
-	binary.BigEndian.PutUint16(port, addr.Port())
-	mac.Write(port)
 
 	return mac.Sum(nil)
 }

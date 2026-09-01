@@ -39,6 +39,7 @@ func commands() []command {
 		{"down", "Remove what NostMesh applied", runDown},
 		{"doctor", "Check prerequisites and diagnose problems", runDoctor},
 		{"serve", "Hold sessions with every authorized peer", runServe},
+		{"state", "Report what a running service is doing", runState},
 		{"connect", "Negotiate a session with a peer", runConnect},
 		{"listen", "Wait for a peer to open a session", runListen},
 		{"sessions", "List authorized peers and active sessions", runSessions},

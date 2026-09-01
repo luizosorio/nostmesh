@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -51,6 +52,46 @@ type peerWorker struct {
 
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// state is what `nostmesh state` reports. It is kept here rather than read
+	// from a SessionManager because each attempt builds its own, so no single
+	// manager sees the peer's history.
+	stateMu  sync.Mutex
+	phase    string
+	attempts int
+	since    time.Time
+	reason   string
+}
+
+// observe records where this worker stands.
+func (w *peerWorker) observe(phase, reason string, attempts int) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	if w.phase != phase {
+		w.since = time.Now()
+	}
+	w.phase = phase
+	w.reason = reason
+	w.attempts = attempts
+}
+
+// snapshot reports this worker's state.
+func (w *peerWorker) snapshot() controlPeerState {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+
+	state := controlPeerState{
+		Peer:     w.peer.Short(),
+		Alias:    w.alias,
+		Phase:    w.phase,
+		Attempts: w.attempts,
+		Reason:   w.reason,
+	}
+	if !w.since.IsZero() {
+		state.Since = w.since.UTC().Format(time.RFC3339)
+	}
+	return state
 }
 
 // runServe is the service entry point.
@@ -95,6 +136,19 @@ func (s *service) run(stdout *output) int {
 		slog.String("event", "service.started"),
 		slog.String("node", s.self.Short()),
 		slog.Int("relays", len(s.cfg.Node.Relays)))
+
+	// The control socket lets `nostmesh state` see live sessions. It is opened
+	// after the log line above so a failure to open is attributable, and its
+	// absence is not fatal: a node that cannot be inspected is worse than one
+	// that cannot be inspected remotely, but it still holds its tunnels.
+	if listener, err := listenControl(controlSocketPath(s.cfg.Node.StateDir)); err != nil {
+		s.log.Warn("state cannot be inspected while this runs",
+			slog.String("event", "control.unavailable"),
+			slog.String("error", err.Error()))
+	} else {
+		defer func() { _ = listener.Close() }()
+		go serveControl(listener, s.snapshot)
+	}
 
 	stdout.printf("nostmesh serving as %s; press Ctrl-C to stop\n", s.self.Short())
 
@@ -284,6 +338,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	defer close(w.done)
 
 	w.log.Info("worker started", slog.String("event", "peer.worker.started"))
+	w.observe("starting", "", 0)
 
 	var consecutive int
 	for attempt := 1; ; attempt++ {
@@ -293,6 +348,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 		}
 
 		started := time.Now()
+		w.observe("connecting", "", attempt)
 		err := w.attempt(ctx, cfg, answered)
 
 		switch {
@@ -302,12 +358,14 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 
 		case err == nil:
 			consecutive = 0
+			w.observe("established", "", attempt)
 			w.log.Info("session established",
 				slog.String("event", "session.established"),
 				slog.Int64("duration_ms", time.Since(started).Milliseconds()))
 
 		default:
 			consecutive++
+			w.observe("retrying", err.Error(), attempt)
 			w.log.Warn("attempt did not complete",
 				slog.String("event", "session.failed"),
 				slog.Int("attempt", attempt),
@@ -341,6 +399,26 @@ func (w *peerWorker) attempt(ctx context.Context, cfg config.Config, answered *o
 	// The pair settles which end opens the session. Both are always willing to
 	// answer, which is the whole reason this runs as a service.
 	return runtime.driver.Connect(ctx, w.peer, orchestrator.RoleAuto)
+}
+
+// snapshot reports what every worker knows, for the control socket.
+func (s *service) snapshot() controlState {
+	s.mu.Lock()
+	workers := make([]*peerWorker, 0, len(s.workers))
+	for _, worker := range s.workers {
+		workers = append(workers, worker)
+	}
+	s.mu.Unlock()
+
+	state := controlState{Node: s.self.Short()}
+	for _, worker := range workers {
+		state.Peers = append(state.Peers, worker.snapshot())
+	}
+
+	sort.Slice(state.Peers, func(i, j int) bool {
+		return state.Peers[i].Alias < state.Peers[j].Alias
+	})
+	return state
 }
 
 // serving reports whether a peer currently has a worker.
