@@ -457,20 +457,21 @@ func (d *Driver) negotiateAsResponder(ctx context.Context, handshake *session.Ha
 		return fmt.Errorf("generating nonce: %w", err)
 	}
 
-	offer, _, err := handshake.BuildOffer(nonce, keyLifetime, d.clock.Now())
+	offer, offerHash, err := handshake.BuildOffer(nonce, keyLifetime, d.clock.Now())
 	if err != nil {
 		return err
 	}
+	// Noted before publishing: an acceptance cannot answer an offer that had not
+	// been made when the acceptance was written.
+	offeredAt := d.clock.Now()
+
 	if err := d.publisher.Publish(ctx, protocol.TypeSessionOffer, handshake.NextSeq(), offer); err != nil {
 		return fmt.Errorf("publishing session offer: %w", err)
 	}
 
-	accept, err := d.awaitMessage(ctx, protocol.TypeSessionAccept)
+	accept, err := d.awaitAccept(ctx, offeredAt, offerHash)
 	if err != nil {
 		return err
-	}
-	if accept.Payload.Accept == nil {
-		return errors.New("accept message carries no accept")
 	}
 	return handshake.ReceiveAccept(*accept.Payload.Accept, accept.Seq, d.clock.Now())
 }
@@ -505,6 +506,47 @@ func (d *Driver) awaitOffer(ctx context.Context, requestedAt time.Time) (Deliver
 			continue
 		}
 		return offer, nil
+	}
+}
+
+// awaitAccept waits for an acceptance of the offer just made.
+//
+// The third instance of the same rule, and the last message that needs it. A
+// relay replays stored acceptances, so the first to arrive routinely answers an
+// offer from an earlier attempt. Its offer hash refers to that older offer, so
+// the handshake would refuse it — correctly — and both sides stall while the
+// acceptance of the current offer waits behind it. Skipping it instead lets the
+// right one through.
+//
+// Measured against real relays: ten consecutive attempts failed with "accepted
+// 7d24eb63, offered <a different value each time>", the responder making a new
+// offer each round and the initiator's first acceptance being replayed into all
+// of them.
+func (d *Driver) awaitAccept(ctx context.Context, offeredAt time.Time, offerHash string) (Delivery, error) {
+	notBefore := offeredAt.Add(-protocol.MaxClockSkew)
+
+	for {
+		accept, err := d.awaitMessage(ctx, protocol.TypeSessionAccept)
+		if err != nil {
+			return Delivery{}, err
+		}
+		if accept.Payload.Accept == nil {
+			return Delivery{}, errors.New("accept message carries no accept")
+		}
+
+		// Written before this offer was made, so it accepts a different one.
+		if accept.CreatedAt.Before(notBefore) {
+			continue
+		}
+
+		// The hash is the authoritative test, and it is cheap: an acceptance
+		// that names a different offer is one this attempt cannot use, whatever
+		// its timestamp says. The clock bound above only spares the work of
+		// checking obviously ancient ones.
+		if accept.Payload.Accept.OfferHash != offerHash {
+			continue
+		}
+		return accept, nil
 	}
 }
 
