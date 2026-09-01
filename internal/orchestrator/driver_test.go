@@ -14,6 +14,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/nostr"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
@@ -775,6 +776,28 @@ func TestResponderAnswersAPeerWhoseClockIsBehind(t *testing.T) {
 	}
 	if chosen.sessionID.String() != skewed.session {
 		t.Errorf("answered %s, expected %s", chosen.sessionID.String()[:8], skewed.session[:8])
+	}
+}
+
+// The settling window must outlast the interval at which the relay set polls.
+//
+// A responder usually starts before its peer, so a request left over from an
+// earlier attempt arrives immediately from the relay's store while the live one
+// appears only on a later poll. A window shorter than that interval closes
+// before the message it exists to wait for could arrive, and the responder
+// answers the stale request every time.
+//
+// Measured against real relays, where a 3-second window and a 3-second poll
+// interval raced and the stale request won.
+func TestTheSettlingWindowOutlastsThePollInterval(t *testing.T) {
+	// Several intervals, not merely more than one: a poll can be missed, and a
+	// window that covers exactly one leaves no margin for the relay's own
+	// latency.
+	minimum := 2 * nostr.PollInterval()
+
+	if requestSettleWindow < minimum {
+		t.Errorf("the settling window is %s but polling runs every %s; a stale request would win the race",
+			requestSettleWindow, nostr.PollInterval())
 	}
 }
 

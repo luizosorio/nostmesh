@@ -592,6 +592,15 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	// system clock, because it bounds a wait on a real socket. An injected clock
 	// belongs to the domain's reasoning about validity, not to how long a
 	// goroutine sleeps.
+	//
+	// The age bound is the protocol's clock-skew tolerance, which is the widest
+	// it can safely be: a peer running that far behind is still healthy, and
+	// rejecting it would refuse a legitimate request. It is deliberately not
+	// narrower — a tighter bound would be measuring recency, and two hosts have
+	// no shared clock to measure recency against.
+	//
+	// It therefore cannot separate a request published a minute ago from the
+	// live one, and does not try. That is what the settling window is for.
 	notBefore := d.clock.Now().Add(-protocol.MaxClockSkew)
 
 	var (
@@ -645,10 +654,16 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 // requestSettleWindow is how long a responder keeps looking for a newer request
 // after the first acceptable one arrives.
 //
-// Short enough not to delay a legitimate initiator, long enough for a relay to
-// finish replaying what it holds and for a retry published moments earlier to
-// arrive behind it.
-const requestSettleWindow = 3 * time.Second
+// This is what separates a live request from one published minutes ago, because
+// the age bound cannot: that bound is sized for clock skew, and a tolerance wide
+// enough for two healthy hosts is far wider than the gap between a stale request
+// and a fresh one.
+//
+// It must outlast the poll interval. A responder typically starts before its
+// peer, so the stale request arrives immediately from the relay's store while
+// the live one appears on a later poll — a window shorter than that interval
+// would close before the message it exists to wait for could arrive.
+const requestSettleWindow = 12 * time.Second
 
 // settle binds the session the responder chose.
 //

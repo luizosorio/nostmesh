@@ -272,6 +272,13 @@ func inboxFilter(self domain.NostrPublicKey, since time.Time) map[string]any {
 	}
 }
 
+// PollInterval reports how often the subscription is reissued.
+//
+// Exposed because anything waiting for a message to arrive has to outlast it: a
+// wait shorter than one interval can close before the poll that would have
+// delivered the message.
+func PollInterval() time.Duration { return pollInterval }
+
 // Poll reissues the inbox subscription periodically.
 //
 // NIP-01 relays are expected to push events matching an open subscription as
