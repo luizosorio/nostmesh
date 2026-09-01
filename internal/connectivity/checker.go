@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +39,13 @@ type Checker struct {
 
 	// outstanding maps a candidate id to the challenge awaiting an answer.
 	outstanding map[string]Challenge
+
+	// arrived and dropped separate "nothing came back" from "something came
+	// back and we discarded it", which have opposite causes.
+	arrived     int
+	dropped     int
+	dropReasons []string
+	answered    int
 }
 
 // CheckerOptions configures a Checker.
@@ -215,6 +223,8 @@ func (c *Checker) awaitResponse(ctx context.Context, responses <-chan probeArriv
 // candidate state: responding to it, or recording it, would let an attacker
 // learn something by sending garbage.
 func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
+	c.countArrival()
+
 	// The kind decides which verifier applies, because the two directions
 	// authenticate different things: a challenge carries no address, while a
 	// response is bound to the address the challenger probed. The kind byte is
@@ -222,12 +232,15 @@ func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
 	// neither.
 	isResponse, err := ProbeKind(arrival.payload)
 	if err != nil {
+		c.countDrop(fmt.Sprintf("%v (first bytes %x, from %s)",
+			err, arrival.payload[:min(12, len(arrival.payload))], arrival.source))
 		return 0, false
 	}
 
 	if !isResponse {
 		challenge, decodeErr := DecodeChallenge(arrival.payload, c.key)
 		if decodeErr != nil {
+			c.countDrop("challenge did not authenticate")
 			return 0, false
 		}
 
@@ -241,13 +254,45 @@ func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
 	return c.verifyResponse(arrival.payload, arrival.source)
 }
 
+// countArrival records that a datagram reached the checker.
+//
+// A probe that never arrives and one that arrives and is discarded look
+// identical from outside: the candidate simply never verifies. Counting them
+// apart is what turns "no candidate could be verified" into a diagnosis.
+func (c *Checker) countArrival() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.arrived++
+}
+
+// countDrop records why a datagram was discarded.
+func (c *Checker) countDrop(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.dropped++
+	if len(c.dropReasons) < maxDropReasons {
+		c.dropReasons = append(c.dropReasons, reason)
+	}
+}
+
 // answer responds to a peer's challenge.
 func (c *Checker) answer(challenge DecodedProbe, source netip.AddrPort) {
 	payload := EncodeResponse(challenge.Nonce, c.clock(), source, c.key)
 
-	// Best effort: a failure here means the peer retries, which its own limits
-	// already bound.
-	_ = c.transport.Send(context.Background(), source, payload)
+	// A failure here is not fatal — the peer retries, and its own limits bound
+	// that — but it must not be invisible. An answer that never leaves looks
+	// exactly like a peer that never replied, and the two have opposite causes:
+	// one is a local socket problem, the other is the network.
+	if err := c.transport.Send(context.Background(), source, payload); err != nil {
+		c.countDrop(fmt.Sprintf("could not answer %s: %v", source, err))
+		return
+	}
+
+	c.mu.Lock()
+	c.answered++
+	c.mu.Unlock()
 }
 
 // verifyResponse matches a response to its challenge and promotes the candidate.
@@ -260,6 +305,7 @@ func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Du
 
 	response, err := DecodeResponse(payload, c.key)
 	if err != nil {
+		c.countDrop("response did not authenticate")
 		return 0, false
 	}
 
@@ -272,6 +318,7 @@ func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Du
 		// The tag proves what the responder claimed; this proves where it
 		// actually arrived from, and the two are independent.
 		if !c.addressMatches(id, source) {
+			c.countDrop(fmt.Sprintf("response for %s arrived from %s", id, source))
 			continue
 		}
 
@@ -303,6 +350,26 @@ func (c *Checker) addressMatches(id string, source netip.AddrPort) bool {
 	return known && address == source
 }
 
+// traffic describes what the checker saw on the wire.
+func (c *Checker) traffic() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.arrived == 0 {
+		return "nothing arrived on the probe socket"
+	}
+
+	summary := fmt.Sprintf("%d datagram(s) arrived, %d answered, %d discarded",
+		c.arrived, c.answered, c.dropped)
+	if len(c.dropReasons) > 0 {
+		summary += ": " + strings.Join(c.dropReasons, "; ")
+	}
+	return summary
+}
+
+// maxDropReasons bounds the detail kept, so a flood cannot grow it.
+const maxDropReasons = 4
+
 // exhaustionError explains why no path was found.
 //
 // "Could not connect" is useless to an operator. This says which candidates
@@ -323,8 +390,11 @@ func (c *Checker) exhaustionError() error {
 			candidate.Address, candidate.Kind, sourceOr(candidate.Source), reason))
 	}
 
-	return fmt.Errorf("%w after %d candidates:\n  %s",
-		ErrNoValidPath, len(diagnostics), joinLines(summary))
+	// What reached the socket separates "the peer never answered" from "it
+	// answered and we discarded it", which have opposite causes and would
+	// otherwise be reported identically.
+	return fmt.Errorf("%w after %d candidates (%s):\n  %s",
+		ErrNoValidPath, len(diagnostics), c.traffic(), joinLines(summary))
 }
 
 func sourceOr(source string) string {
