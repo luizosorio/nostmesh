@@ -55,8 +55,8 @@ func (f *fakeTransport) Send(_ context.Context, target netip.AddrPort, payload [
 		return nil //nolint:nilerr // silence is the modelled behaviour
 	}
 
-	// The responder answers with the address the challenger probed, which is
-	// what that challenger will verify the tag against.
+	// The responder states the address it saw the challenge come from. Here the
+	// fake has no NAT between the two, so that is the target itself.
 	response := EncodeResponse(decoded.Nonce, f.clock(), target, key)
 
 	select {
@@ -349,6 +349,52 @@ func TestCancellationStopsChecking(t *testing.T) {
 
 // A peer's challenge is answered, which is what lets the peer verify its own
 // candidate. The answer is never larger than the challenge.
+// A response must arrive from the address it is meant to verify.
+//
+// This check is what binds a promotion to its path, and after the probe stopped
+// authenticating the address it is aimed at, it carries that property alone. A
+// correctly signed response arriving from anywhere else promotes nothing.
+//
+// Without it, an attacker holding the session key could answer from any address
+// and promote a candidate the peer is not reachable at — which is the whole
+// point of verifying a candidate rather than believing it.
+func TestAResponseFromTheWrongAddressPromotesNothing(t *testing.T) {
+	fixture := newCheckerFixture(t)
+	checker := fixture.checker
+
+	candidate := netip.MustParseAddrPort("198.51.100.50:51820")
+	if err := fixture.engine.AddCandidate(Candidate{
+		ID:      "target",
+		Kind:    KindHost,
+		Address: candidate,
+		Source:  "test",
+	}); err != nil {
+		t.Fatalf("adding candidate: %v", err)
+	}
+
+	if err := checker.sendChallenge(context.Background(), Candidate{ID: "target", Address: candidate}); err != nil {
+		t.Fatalf("sending: %v", err)
+	}
+
+	checker.mu.Lock()
+	challenge := checker.outstanding["target"]
+	checker.mu.Unlock()
+
+	// A valid response, correctly signed, arriving from somewhere else.
+	elsewhere := netip.MustParseAddrPort("203.0.113.9:51820")
+	response := EncodeResponse(challenge.Nonce, testNow(), elsewhere, testKey())
+
+	if _, verified := checker.handleArrival(probeArrival{payload: response, source: elsewhere}); verified {
+		t.Error("a response from an address other than the one probed promoted a candidate")
+	}
+
+	for _, diagnostic := range fixture.engine.Diagnostics() {
+		if diagnostic.ID == "target" && diagnostic.Status == StatusValid {
+			t.Error("the candidate became valid on a response from elsewhere")
+		}
+	}
+}
+
 func TestPeerChallengeIsAnswered(t *testing.T) {
 	fixture := newCheckerFixture(t)
 	transport := fixture.transport

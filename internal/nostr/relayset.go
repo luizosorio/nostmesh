@@ -407,7 +407,6 @@ const (
 	// pollInterval is how often the subscription is reissued, so a relay that
 	// does not push live events still delivers within a bounded delay.
 	pollInterval = 3 * time.Second
-
 )
 
 // randomSubscriptionID produces an identifier for a relay subscription.

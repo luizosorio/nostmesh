@@ -64,7 +64,7 @@ func TestChallengeResponseRoundTrip(t *testing.T) {
 
 	response := EncodeResponse(decoded.Nonce, testNow(), target, key)
 
-	decodedResponse, err := DecodeResponse(response, target, key)
+	decodedResponse, err := DecodeResponse(response, key)
 	if err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
@@ -89,21 +89,38 @@ func TestForgedResponseWithoutTheKeyFails(t *testing.T) {
 	attackerKey := DeriveSessionKey("session-1", "attacker", "guess")
 	forged := EncodeResponse(challenge.Nonce, testNow(), target, attackerKey)
 
-	if _, err := DecodeResponse(forged, target, key); !errors.Is(err, ErrProbeUnauthenticated) {
+	if _, err := DecodeResponse(forged, key); !errors.Is(err, ErrProbeUnauthenticated) {
 		t.Errorf("expected ErrProbeUnauthenticated, got: %v", err)
 	}
 }
 
-// A probe is bound to the address it was made for, so one captured on the way
-// to one address cannot be replayed toward another.
-func TestProbeIsBoundToItsAddress(t *testing.T) {
+// The address a response states is authenticated, so a peer cannot claim to
+// have been reached somewhere it was not.
+//
+// This address is how a node learns its own mapped address for a path without
+// trusting a third party. If it could be rewritten in flight, an on-path
+// attacker would choose what a node believes about itself.
+func TestTheStatedAddressIsAuthenticated(t *testing.T) {
 	key := testKey()
+	observed := testTarget()
 
-	response := EncodeResponse(testNonce(), testNow(), testTarget(), key)
-	elsewhere := netip.MustParseAddrPort("203.0.113.5:51820")
+	response := EncodeResponse(testNonce(), testNow(), observed, key)
 
-	if _, err := DecodeResponse(response, elsewhere, key); !errors.Is(err, ErrProbeUnauthenticated) {
-		t.Errorf("a response replayed to validate another address must fail, got: %v", err)
+	decoded, err := DecodeResponse(response, key)
+	if err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if decoded.Observed != observed {
+		t.Errorf("stated address is %s, expected %s", decoded.Observed, observed)
+	}
+
+	// Rewriting the address must invalidate the tag.
+	tampered := make([]byte, len(response))
+	copy(tampered, response)
+	tampered[1+NonceSize+8] ^= 0xFF
+
+	if _, err := DecodeResponse(tampered, key); !errors.Is(err, ErrProbeUnauthenticated) {
+		t.Errorf("a rewritten address must be caught, got: %v", err)
 	}
 }
 
@@ -134,16 +151,21 @@ func TestChallengeSurvivesAddressTranslation(t *testing.T) {
 	}
 }
 
-// The port is part of the binding: two mappings of the same host are distinct
-// paths, and a probe for one must not validate the other.
-func TestProbeIsBoundToItsPort(t *testing.T) {
+// The port is part of the stated address: two mappings of the same host are
+// distinct paths, and a response about one must not be read as being about the
+// other.
+func TestTheStatedPortIsAuthenticated(t *testing.T) {
 	key := testKey()
 
 	response := EncodeResponse(testNonce(), testNow(), testTarget(), key)
-	otherPort := netip.MustParseAddrPort("198.51.100.10:51821")
 
-	if _, err := DecodeResponse(response, otherPort, key); !errors.Is(err, ErrProbeUnauthenticated) {
-		t.Errorf("a response replayed to another port must fail, got: %v", err)
+	// The port sits at the end of the observed address.
+	tampered := make([]byte, len(response))
+	copy(tampered, response)
+	tampered[1+NonceSize+8+16] ^= 0xFF
+
+	if _, err := DecodeResponse(tampered, key); !errors.Is(err, ErrProbeUnauthenticated) {
+		t.Errorf("a rewritten port must be caught, got: %v", err)
 	}
 }
 
@@ -176,7 +198,7 @@ func TestResponseToAnotherChallengeIsRefused(t *testing.T) {
 
 	response := EncodeResponse(second.Nonce, testNow(), target, key)
 
-	decoded, err := DecodeResponse(response, target, key)
+	decoded, err := DecodeResponse(response, key)
 	if err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
@@ -189,7 +211,6 @@ func TestResponseToAnotherChallengeIsRefused(t *testing.T) {
 // different messages and confusing them would let one stand in for the other.
 func TestChallengeIsNotAResponse(t *testing.T) {
 	key := testKey()
-	target := testTarget()
 
 	challenge, err := NewChallenge(testNow())
 	if err != nil {
@@ -201,7 +222,7 @@ func TestChallengeIsNotAResponse(t *testing.T) {
 	// A challenge must not authenticate as a response: the kind byte is covered
 	// by the tag, so the two forms are not interchangeable even under the same
 	// key.
-	if _, err := DecodeResponse(encoded, target, key); !errors.Is(err, ErrProbeMismatch) {
+	if _, err := DecodeResponse(encoded, key); !errors.Is(err, ErrProbeMismatch) {
 		t.Errorf("a challenge decoded as a response, got: %v", err)
 	}
 
@@ -216,7 +237,6 @@ func TestChallengeIsNotAResponse(t *testing.T) {
 
 func TestMalformedProbesAreRefused(t *testing.T) {
 	key := testKey()
-	target := testTarget()
 
 	tests := []struct {
 		name string
@@ -230,7 +250,7 @@ func TestMalformedProbesAreRefused(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := DecodeResponse(tt.raw, target, key); err == nil {
+			if _, err := DecodeResponse(tt.raw, key); err == nil {
 				t.Error("a malformed probe must be refused")
 			}
 			if _, err := DecodeChallenge(tt.raw, key); err == nil {
@@ -302,14 +322,17 @@ func TestAuthenticationFailuresAreIndistinguishable(t *testing.T) {
 	encoded := EncodeResponse(testNonce(), testNow(), target, key)
 
 	wrongKey := DeriveSessionKey("other", "a", "b")
-	_, wrongKeyErr := DecodeResponse(encoded, target, wrongKey)
+	_, wrongKeyErr := DecodeResponse(encoded, wrongKey)
 
 	tampered := make([]byte, len(encoded))
 	copy(tampered, encoded)
 	tampered[5] ^= 0xFF
-	_, tamperedErr := DecodeResponse(tampered, target, key)
+	_, tamperedErr := DecodeResponse(tampered, key)
 
-	_, wrongAddrErr := DecodeResponse(encoded, netip.MustParseAddrPort("203.0.113.1:1"), key)
+	tamperedAddress := make([]byte, len(encoded))
+	copy(tamperedAddress, encoded)
+	tamperedAddress[1+NonceSize+8] ^= 0xFF
+	_, wrongAddrErr := DecodeResponse(tamperedAddress, key)
 
 	if wrongKeyErr == nil || tamperedErr == nil || wrongAddrErr == nil {
 		t.Fatal("all three must fail")

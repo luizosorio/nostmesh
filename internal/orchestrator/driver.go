@@ -837,8 +837,6 @@ func (d *Driver) readRequest(ctx context.Context) (*pendingRequest, error) {
 	}, nil
 }
 
-
-
 // keyLifetime bounds how long a negotiated tunnel key stays valid.
 const keyLifetime = time.Hour
 

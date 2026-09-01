@@ -88,8 +88,8 @@ func NewUDPTransport(port uint16) (*UDPTransport, error) {
 	}
 
 	return &UDPTransport{
-		conn: conn,
-		port: bound,
+		conn:   conn,
+		port:   bound,
 		stun:   make(chan stunDatagram, 4),
 		probes: make(chan stunDatagram, 8),
 	}, nil
