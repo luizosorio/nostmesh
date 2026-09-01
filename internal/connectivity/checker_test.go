@@ -47,15 +47,16 @@ func (f *fakeTransport) Send(_ context.Context, target netip.AddrPort, payload [
 		return nil
 	}
 
-	decoded, err := DecodeProbe(payload, target, key)
-	if err != nil || decoded.IsResponse {
+	decoded, err := DecodeChallenge(payload, key)
+	if err != nil {
 		// A host that cannot make sense of the probe stays silent, which is
 		// what an unreachable address or a wrong-key responder looks like on a
 		// real network. Send succeeded; nothing comes back.
 		return nil //nolint:nilerr // silence is the modelled behaviour
 	}
 
-	// The responder answers from the address that was probed.
+	// The responder answers with the address the challenger probed, which is
+	// what that challenger will verify the tag against.
 	response := EncodeResponse(decoded.Nonce, f.clock(), target, key)
 
 	select {
@@ -360,8 +361,9 @@ func TestPeerChallengeIsAnswered(t *testing.T) {
 		t.Fatalf("building challenge: %v", err)
 	}
 
-	// The peer's challenge is authenticated for the address it came from.
-	incoming := EncodeChallenge(challenge, peer, testKey())
+	// The challenge carries no address, so it authenticates the same whatever
+	// path it took.
+	incoming := EncodeChallenge(challenge, testKey())
 
 	_, verified := checker.handleArrival(probeArrival{payload: incoming, source: peer})
 	if verified {

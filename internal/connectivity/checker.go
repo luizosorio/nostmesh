@@ -175,7 +175,7 @@ func (c *Checker) sendChallenge(ctx context.Context, candidate Candidate) error 
 		return err
 	}
 
-	payload := EncodeChallenge(challenge, candidate.Address, c.key)
+	payload := EncodeChallenge(challenge, c.key)
 
 	if err := c.engine.RecordAttempt(candidate.ID); err != nil {
 		return err
@@ -215,20 +215,30 @@ func (c *Checker) awaitResponse(ctx context.Context, responses <-chan probeArriv
 // candidate state: responding to it, or recording it, would let an attacker
 // learn something by sending garbage.
 func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
-	decoded, err := DecodeProbe(arrival.payload, arrival.source, c.key)
+	// The kind decides which verifier applies, because the two directions
+	// authenticate different things: a challenge carries no address, while a
+	// response is bound to the address the challenger probed. The kind byte is
+	// itself covered by the tag, so a probe that lies about it authenticates as
+	// neither.
+	isResponse, err := ProbeKind(arrival.payload)
 	if err != nil {
 		return 0, false
 	}
 
-	if !decoded.IsResponse {
+	if !isResponse {
+		challenge, decodeErr := DecodeChallenge(arrival.payload, c.key)
+		if decodeErr != nil {
+			return 0, false
+		}
+
 		// A challenge from the peer. Answering it is what lets the peer verify
 		// its own candidate, and it costs one packet no larger than what
 		// arrived.
-		c.answer(decoded, arrival.source)
+		c.answer(challenge, arrival.source)
 		return 0, false
 	}
 
-	return c.verifyResponse(decoded, arrival.source)
+	return c.verifyResponse(arrival.payload, arrival.source)
 }
 
 // answer responds to a peer's challenge.
@@ -244,18 +254,31 @@ func (c *Checker) answer(challenge DecodedProbe, source netip.AddrPort) {
 //
 // The response must have arrived from the exact address probed, which
 // DecodeProbe already enforced by authenticating over the source address.
-func (c *Checker) verifyResponse(response DecodedProbe, source netip.AddrPort) (time.Duration, bool) {
+func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Duration, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for id, challenge := range c.outstanding {
+		address, known := c.candidateAddress(id)
+		if !known {
+			continue
+		}
+
+		// The tag must cover the address this node probed. A response captured
+		// while verifying one candidate therefore cannot promote another, which
+		// is the property that used to live — and did not work — in the
+		// challenge.
+		response, err := DecodeResponse(payload, address, c.key)
+		if err != nil {
+			continue
+		}
 		if err := VerifyResponse(challenge, response); err != nil {
 			continue
 		}
 
-		// Confirm the candidate this challenge was sent to is the one that
-		// answered. Without this, a response could validate a different
-		// candidate that happens to share a nonce.
+		// Confirm the datagram physically came back from the address probed.
+		// The tag proves what the responder claimed; this proves where it
+		// actually arrived from, and the two are independent.
 		if !c.addressMatches(id, source) {
 			continue
 		}
@@ -272,14 +295,20 @@ func (c *Checker) verifyResponse(response DecodedProbe, source netip.AddrPort) (
 	return 0, false
 }
 
-// addressMatches reports whether a candidate is at the given address.
-func (c *Checker) addressMatches(id string, source netip.AddrPort) bool {
+// candidateAddress returns the address a candidate was probed at.
+func (c *Checker) candidateAddress(id string) (netip.AddrPort, bool) {
 	for _, candidate := range c.engine.Diagnostics() {
 		if candidate.ID == id {
-			return candidate.Address == source
+			return candidate.Address, true
 		}
 	}
-	return false
+	return netip.AddrPort{}, false
+}
+
+// addressMatches reports whether a candidate is at the given address.
+func (c *Checker) addressMatches(id string, source netip.AddrPort) bool {
+	address, known := c.candidateAddress(id)
+	return known && address == source
 }
 
 // exhaustionError explains why no path was found.

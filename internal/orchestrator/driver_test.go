@@ -470,7 +470,7 @@ func (a *answeringTransport) Send(_ context.Context, target netip.AddrPort, payl
 
 	// A probe that does not authenticate is dropped silently, exactly as a real
 	// peer would drop it: answering would defeat the check.
-	decoded, ok := decodeProbe(payload, target, key)
+	decoded, ok := decodeChallenge(payload, key)
 	if !ok || decoded.IsResponse {
 		return nil
 	}
@@ -882,12 +882,12 @@ func requestMessage(t *testing.T) scriptedMessage {
 	}
 }
 
-// decodeProbe reports whether a datagram is an authentic probe.
+// decodeChallenge reports whether a datagram is an authentic challenge.
 //
 // The boolean is deliberate: an unauthenticated probe is not an error to
 // propagate, it is a datagram to ignore, and the two must not be confused.
-func decodeProbe(payload []byte, target netip.AddrPort, key connectivity.SessionKey) (connectivity.DecodedProbe, bool) {
-	decoded, err := connectivity.DecodeProbe(payload, target, key)
+func decodeChallenge(payload []byte, key connectivity.SessionKey) (connectivity.DecodedProbe, bool) {
+	decoded, err := connectivity.DecodeChallenge(payload, key)
 	return decoded, err == nil
 }
 

@@ -465,11 +465,13 @@ func (t *loopbackTransport) Send(_ context.Context, target netip.AddrPort, paylo
 		return nil
 	}
 
-	decoded, err := connectivity.DecodeProbe(payload, target, t.key)
-	if err != nil || decoded.IsResponse {
+	decoded, err := connectivity.DecodeChallenge(payload, t.key)
+	if err != nil {
 		return nil //nolint:nilerr // silence is the modelled behaviour
 	}
 
+	// The peer authenticates its answer with the address it observed the
+	// challenge arriving from, which here is the challenger's own address.
 	response := connectivity.EncodeResponse(decoded.Nonce, t.clock(), target, t.key)
 
 	select {

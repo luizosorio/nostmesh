@@ -52,10 +52,9 @@ func TestChallengeResponseRoundTrip(t *testing.T) {
 		t.Fatalf("building challenge: %v", err)
 	}
 
-	// The responder receives the challenge from the challenger's address.
-	encoded := EncodeChallenge(challenge, target, key)
+	encoded := EncodeChallenge(challenge, key)
 
-	decoded, err := DecodeProbe(encoded, target, key)
+	decoded, err := DecodeChallenge(encoded, key)
 	if err != nil {
 		t.Fatalf("decoding challenge: %v", err)
 	}
@@ -65,7 +64,7 @@ func TestChallengeResponseRoundTrip(t *testing.T) {
 
 	response := EncodeResponse(decoded.Nonce, testNow(), target, key)
 
-	decodedResponse, err := DecodeProbe(response, target, key)
+	decodedResponse, err := DecodeResponse(response, target, key)
 	if err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
@@ -90,7 +89,7 @@ func TestForgedResponseWithoutTheKeyFails(t *testing.T) {
 	attackerKey := DeriveSessionKey("session-1", "attacker", "guess")
 	forged := EncodeResponse(challenge.Nonce, testNow(), target, attackerKey)
 
-	if _, err := DecodeProbe(forged, target, key); !errors.Is(err, ErrProbeUnauthenticated) {
+	if _, err := DecodeResponse(forged, target, key); !errors.Is(err, ErrProbeUnauthenticated) {
 		t.Errorf("expected ErrProbeUnauthenticated, got: %v", err)
 	}
 }
@@ -100,16 +99,38 @@ func TestForgedResponseWithoutTheKeyFails(t *testing.T) {
 func TestProbeIsBoundToItsAddress(t *testing.T) {
 	key := testKey()
 
+	response := EncodeResponse(testNonce(), testNow(), testTarget(), key)
+	elsewhere := netip.MustParseAddrPort("203.0.113.5:51820")
+
+	if _, err := DecodeResponse(response, elsewhere, key); !errors.Is(err, ErrProbeUnauthenticated) {
+		t.Errorf("a response replayed to validate another address must fail, got: %v", err)
+	}
+}
+
+// A challenge carries no address, and must authenticate whatever path it took.
+//
+// The two ends of a path do not share an address: the sender knows where it
+// aimed, the receiver knows where the datagram came from, and behind NAT those
+// differ. A challenge bound to either one is silently dropped by the other side.
+//
+// Measured between two real hosts, one behind NAT: both sides probed, neither
+// answered, and nothing reported an error. The test that should have caught it
+// used one variable for both addresses, so it passed by construction.
+func TestChallengeSurvivesAddressTranslation(t *testing.T) {
+	key := testKey()
+
 	challenge, err := NewChallenge(testNow())
 	if err != nil {
 		t.Fatalf("building challenge: %v", err)
 	}
 
-	encoded := EncodeChallenge(challenge, testTarget(), key)
-	elsewhere := netip.MustParseAddrPort("203.0.113.5:51820")
+	// The sender aims at the peer's public address.
+	encoded := EncodeChallenge(challenge, key)
 
-	if _, err := DecodeProbe(encoded, elsewhere, key); !errors.Is(err, ErrProbeUnauthenticated) {
-		t.Errorf("a probe replayed to another address must fail, got: %v", err)
+	// The receiver sees it arrive from the sender's NAT-mapped address, which
+	// is a different value entirely.
+	if _, err := DecodeChallenge(encoded, key); err != nil {
+		t.Fatalf("a challenge must authenticate regardless of the path it took: %v", err)
 	}
 }
 
@@ -118,17 +139,21 @@ func TestProbeIsBoundToItsAddress(t *testing.T) {
 func TestProbeIsBoundToItsPort(t *testing.T) {
 	key := testKey()
 
-	challenge, err := NewChallenge(testNow())
-	if err != nil {
-		t.Fatalf("building challenge: %v", err)
-	}
-
-	encoded := EncodeChallenge(challenge, testTarget(), key)
+	response := EncodeResponse(testNonce(), testNow(), testTarget(), key)
 	otherPort := netip.MustParseAddrPort("198.51.100.10:51821")
 
-	if _, err := DecodeProbe(encoded, otherPort, key); !errors.Is(err, ErrProbeUnauthenticated) {
-		t.Errorf("a probe replayed to another port must fail, got: %v", err)
+	if _, err := DecodeResponse(response, otherPort, key); !errors.Is(err, ErrProbeUnauthenticated) {
+		t.Errorf("a response replayed to another port must fail, got: %v", err)
 	}
+}
+
+// testNonce is a fixed nonce for tests that only need one.
+func testNonce() [NonceSize]byte {
+	var nonce [NonceSize]byte
+	for i := range nonce {
+		nonce[i] = byte(i + 1)
+	}
+	return nonce
 }
 
 // A response to a different challenge must not validate this one, or an
@@ -151,7 +176,7 @@ func TestResponseToAnotherChallengeIsRefused(t *testing.T) {
 
 	response := EncodeResponse(second.Nonce, testNow(), target, key)
 
-	decoded, err := DecodeProbe(response, target, key)
+	decoded, err := DecodeResponse(response, target, key)
 	if err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
@@ -171,12 +196,19 @@ func TestChallengeIsNotAResponse(t *testing.T) {
 		t.Fatalf("building challenge: %v", err)
 	}
 
-	encoded := EncodeChallenge(challenge, target, key)
-	decoded, err := DecodeProbe(encoded, target, key)
+	encoded := EncodeChallenge(challenge, key)
+
+	// A challenge must not authenticate as a response: the kind byte is covered
+	// by the tag, so the two forms are not interchangeable even under the same
+	// key.
+	if _, err := DecodeResponse(encoded, target, key); !errors.Is(err, ErrProbeMismatch) {
+		t.Errorf("a challenge decoded as a response, got: %v", err)
+	}
+
+	decoded, err := DecodeChallenge(encoded, key)
 	if err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
-
 	if err := VerifyResponse(challenge, decoded); !errors.Is(err, ErrProbeMismatch) {
 		t.Errorf("expected ErrProbeMismatch, got: %v", err)
 	}
@@ -198,8 +230,11 @@ func TestMalformedProbesAreRefused(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := DecodeProbe(tt.raw, target, key); err == nil {
+			if _, err := DecodeResponse(tt.raw, target, key); err == nil {
 				t.Error("a malformed probe must be refused")
+			}
+			if _, err := DecodeChallenge(tt.raw, key); err == nil {
+				t.Error("a malformed probe must be refused as a challenge too")
 			}
 		})
 	}
@@ -216,7 +251,7 @@ func TestProbeDoesNotAmplify(t *testing.T) {
 		t.Fatalf("building challenge: %v", err)
 	}
 
-	encoded := EncodeChallenge(challenge, target, key)
+	encoded := EncodeChallenge(challenge, key)
 	response := EncodeResponse(challenge.Nonce, testNow(), target, key)
 
 	if len(response) > len(encoded) {
@@ -262,21 +297,19 @@ func TestAuthenticationFailuresAreIndistinguishable(t *testing.T) {
 	key := testKey()
 	target := testTarget()
 
-	challenge, err := NewChallenge(testNow())
-	if err != nil {
-		t.Fatalf("building challenge: %v", err)
-	}
-	encoded := EncodeChallenge(challenge, target, key)
+	// A response, because that is the form carrying an address: the three
+	// failures compared here are wrong key, tampered bytes, and wrong address.
+	encoded := EncodeResponse(testNonce(), testNow(), target, key)
 
 	wrongKey := DeriveSessionKey("other", "a", "b")
-	_, wrongKeyErr := DecodeProbe(encoded, target, wrongKey)
+	_, wrongKeyErr := DecodeResponse(encoded, target, wrongKey)
 
 	tampered := make([]byte, len(encoded))
 	copy(tampered, encoded)
 	tampered[5] ^= 0xFF
-	_, tamperedErr := DecodeProbe(tampered, target, key)
+	_, tamperedErr := DecodeResponse(tampered, target, key)
 
-	_, wrongAddrErr := DecodeProbe(encoded, netip.MustParseAddrPort("203.0.113.1:1"), key)
+	_, wrongAddrErr := DecodeResponse(encoded, netip.MustParseAddrPort("203.0.113.1:1"), key)
 
 	if wrongKeyErr == nil || tamperedErr == nil || wrongAddrErr == nil {
 		t.Fatal("all three must fail")
