@@ -40,6 +40,15 @@ type Checker struct {
 	// outstanding maps a candidate id to the challenge awaiting an answer.
 	outstanding map[string]Challenge
 
+	// counters guards the tallies below, separately from mu.
+	//
+	// They are diagnostics and share nothing with the outstanding challenges,
+	// so a single lock would only create reentrancy: verifyResponse holds mu
+	// across the whole match and still has to record what it discarded. A Go
+	// mutex is not reentrant, and that combination deadlocks the receiving
+	// goroutine on the first response that fails to authenticate.
+	counters sync.Mutex
+
 	// arrived and dropped separate "nothing came back" from "something came
 	// back and we discarded it", which have opposite causes.
 	arrived     int
@@ -244,6 +253,11 @@ func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
 			return 0, false
 		}
 
+		// The address it came from is worth more than any address we were
+		// told about, because a packet actually traversed it. Learning it
+		// happens only now, after the tag verified.
+		c.learnPeerReflexive(arrival.source)
+
 		// A challenge from the peer. Answering it is what lets the peer verify
 		// its own candidate, and it costs one packet no larger than what
 		// arrived.
@@ -260,20 +274,72 @@ func (c *Checker) handleArrival(arrival probeArrival) (time.Duration, bool) {
 // identical from outside: the candidate simply never verifies. Counting them
 // apart is what turns "no candidate could be verified" into a diagnosis.
 func (c *Checker) countArrival() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.counters.Lock()
+	defer c.counters.Unlock()
 
 	c.arrived++
 }
 
 // countDrop records why a datagram was discarded.
 func (c *Checker) countDrop(reason string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.counters.Lock()
+	defer c.counters.Unlock()
 
 	c.dropped++
 	if len(c.dropReasons) < maxDropReasons {
 		c.dropReasons = append(c.dropReasons, reason)
+	}
+}
+
+// learnPeerReflexive records the address an authenticated challenge came from.
+//
+// A peer behind NAT cannot know the address its own traffic will appear to come
+// from: what STUN reported is the mapping toward the observer, and an
+// address-dependent NAT uses a different one per destination. So the address
+// that works is one neither side can announce — it only becomes knowable when a
+// packet arrives through it.
+//
+// The candidate enters UNVERIFIED like every other. A datagram arriving from an
+// address is not proof the address works in the other direction, and the
+// challenge/response that follows is what settles that. Learning here only
+// means the address gets probed at all: without it a NAT'd peer is answered
+// indefinitely while every candidate we hold stays unreachable.
+//
+// Reachable only after DecodeChallenge verified the tag, so an off-path
+// attacker cannot reach it whatever source address it spoofs. What remains is a
+// session peer — someone already authorized — spending its own candidate
+// budget: at most MaxThirdPartyCandidates addresses, probed
+// MaxAttemptsPerCandidate times each, at probe size, toward addresses
+// ValidateAddress permits. That bound is the same one srflx candidates from a
+// lying observer already had, and answering still costs exactly one packet.
+func (c *Checker) learnPeerReflexive(source netip.AddrPort) {
+	// The engine takes its own lock, so this must not hold mu across the call:
+	// verifyResponse already goes mu then engine, and acquiring them the other
+	// way round here would complete a cycle.
+	for _, known := range c.engine.Diagnostics() {
+		if known.Address == source {
+			// Already described, under whatever kind. Adding it again would
+			// spend a third-party slot to probe the same address twice.
+			return
+		}
+	}
+
+	// The id is derived from the address so a peer that repeats a challenge
+	// before the next probe round produces the same candidate rather than a new
+	// one. AddCandidate treats a repeated id at the same address as a no-op.
+	candidate := Candidate{
+		ID:       fmt.Sprintf("prflx-%s", source),
+		Kind:     KindPeerReflexive,
+		Address:  source,
+		Priority: priorityFor(KindPeerReflexive, source.Addr()),
+		Source:   "peer probe",
+	}
+
+	// Refusal is a limit doing its job, not a reason to stop answering. It is
+	// counted because a candidate table that quietly stopped growing and a peer
+	// that never probed look identical from the outside.
+	if err := c.engine.AddCandidate(candidate); err != nil {
+		c.countDrop(fmt.Sprintf("could not learn %s: %v", source, err))
 	}
 }
 
@@ -290,9 +356,9 @@ func (c *Checker) answer(challenge DecodedProbe, source netip.AddrPort) {
 		return
 	}
 
-	c.mu.Lock()
+	c.counters.Lock()
 	c.answered++
-	c.mu.Unlock()
+	c.counters.Unlock()
 }
 
 // verifyResponse matches a response to its challenge and promotes the candidate.
@@ -331,6 +397,11 @@ func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Du
 		return roundTrip, true
 	}
 
+	// Nothing matched. Counting it matters as much as the cases above: a
+	// response for a challenge already answered, or one whose nonce belongs to
+	// no outstanding probe, would otherwise vanish and leave the summary
+	// reporting that nothing was discarded while discarding this.
+	c.countDrop(fmt.Sprintf("response from %s matched no outstanding challenge", source))
 	return 0, false
 }
 
@@ -352,10 +423,10 @@ func (c *Checker) addressMatches(id string, source netip.AddrPort) bool {
 
 // traffic describes what the checker saw on the wire.
 func (c *Checker) traffic() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.counters.Lock()
+	defer c.counters.Unlock()
 
-	if c.arrived == 0 {
+	if c.arrived == 0 && c.dropped == 0 {
 		return "nothing arrived on the probe socket"
 	}
 
