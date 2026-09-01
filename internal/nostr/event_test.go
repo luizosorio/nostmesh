@@ -229,6 +229,62 @@ func TestReplaceableTagSeparatesMessages(t *testing.T) {
 	}
 }
 
+// A request opens a conversation, and a newer one abandons the older. Keeping
+// both on the relay means a responder that subscribes later finds two live
+// requests and answers whichever arrives first — negotiating a session its
+// counterpart already gave up on. Observed against real relays, where a
+// responder adopted a session from a run several minutes earlier.
+func TestOpeningTagReplacesPreviousAttempts(t *testing.T) {
+	peer := testSigner(t, 30).PublicKey()
+	other := testSigner(t, 31).PublicKey()
+
+	first := OpeningTag(peer, "session.request")
+	second := OpeningTag(peer, "session.request")
+
+	if first[0] != "d" {
+		t.Errorf("tag must be named d, got %q", first[0])
+	}
+	if first[1] != second[1] {
+		t.Errorf("two requests to the same peer must share a d value so the newer replaces the older: %q != %q",
+			first[1], second[1])
+	}
+
+	// A different peer is a different conversation and must not be replaced.
+	if OpeningTag(other, "session.request")[1] == first[1] {
+		t.Error("requests to different peers must not replace each other")
+	}
+
+	// The opening tag must not collide with an in-session position, or a
+	// request would replace some later message of the same session.
+	position := ReplaceableTag("some-session", "session.request", 0)
+	if position[1] == first[1] {
+		t.Error("the opening tag collides with an in-session position")
+	}
+}
+
+// An offer opens the answering half of a conversation, so it is superseded by a
+// later one exactly as a request is. Keeping both means an initiator finds an
+// offer answering a session it abandoned, discards it, and waits out its timeout
+// while the live answer sits behind it — the request-side failure seen from the
+// other end.
+func TestOpeningTagCoversBothHalvesOfTheExchange(t *testing.T) {
+	peer := testSigner(t, 32).PublicKey()
+
+	request := OpeningTag(peer, "session.request")
+	offer := OpeningTag(peer, "session.offer")
+
+	// Each half replaces only its own kind: an offer must not displace the
+	// request that prompted it.
+	if request[1] == offer[1] {
+		t.Errorf("a request and an offer share d value %q; one would replace the other", request[1])
+	}
+
+	// A second attempt of either replaces the first.
+	if OpeningTag(peer, "session.offer")[1] != offer[1] {
+		t.Error("two offers to the same peer must share a d value so the newer replaces the older")
+	}
+}
+
 func TestRecipientTag(t *testing.T) {
 	signer := testSigner(t, 9)
 	tag := RecipientTag(signer.PublicKey())

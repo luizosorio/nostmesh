@@ -195,6 +195,66 @@ func TestSTUNAndProbeShareTheSocket(t *testing.T) {
 	}
 }
 
+// Gathering runs before any probe exists, so nothing else is reading the
+// socket. A STUN response then arrives at a transport with no reader, and a
+// datagram nobody reads is a datagram nobody receives — the observer waits out
+// its timeout while the answer sits in the socket buffer.
+//
+// Measured against a real STUN server: every gathering method failed and the
+// peer was offered an empty candidate list.
+func TestSTUNArrivesWithNoProbeReaderRunning(t *testing.T) {
+	transport := newTestTransport(t)
+	sender := newTestTransport(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stunMessage := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	if err := sender.Send(ctx, localAddr(t, transport), stunMessage.Raw); err != nil {
+		t.Fatalf("sending: %v", err)
+	}
+
+	// Nothing calls Receive: this is the state during gathering.
+	payload, _, err := transport.ReceiveSTUN(ctx)
+	if err != nil {
+		t.Fatalf("a STUN response must arrive with no probe reader running: %v", err)
+	}
+	if !isSTUNMessage(payload) {
+		t.Error("the datagram delivered to the observer is not STUN")
+	}
+}
+
+// A probe arriving while the observer holds the socket must be kept for the
+// checker, not discarded: the peer may start probing before this side has
+// finished gathering.
+func TestAProbeArrivingDuringGatheringIsKept(t *testing.T) {
+	transport := newTestTransport(t)
+	sender := newTestTransport(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	probe := make([]byte, ProbeSize)
+	probe[0] = 1
+	if err := sender.Send(ctx, localAddr(t, transport), probe); err != nil {
+		t.Fatalf("sending probe: %v", err)
+	}
+
+	// The observer reads first and must sort the probe aside rather than drop
+	// it. It finds no STUN, so it times out — which is expected here.
+	waiting, cancelWait := context.WithTimeout(ctx, 500*time.Millisecond)
+	_, _, _ = transport.ReceiveSTUN(waiting)
+	cancelWait()
+
+	received, _, err := transport.Receive(ctx)
+	if err != nil {
+		t.Fatalf("the probe was discarded while the observer held the socket: %v", err)
+	}
+	if len(received) != ProbeSize {
+		t.Errorf("received %d bytes, expected the %d-byte probe", len(received), ProbeSize)
+	}
+}
+
 func TestSTUNDetection(t *testing.T) {
 	stunMessage := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
 

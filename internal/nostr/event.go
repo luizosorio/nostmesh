@@ -180,14 +180,29 @@ func RecipientTag(recipient domain.NostrPublicKey) []string {
 //
 // Kinds in the 30000-39999 range are parameterized-replaceable: a relay keeps
 // only the newest event per (author, kind, d) triple. The d value therefore
-// decides what replaces what, and getting it wrong silently destroys messages.
+// decides what replaces what, and getting it wrong silently destroys messages —
+// or, just as badly, silently preserves ones that should have been replaced.
 //
-// Scoping by session alone would make an offer replace the request that
-// prompted it. Scoping by session and type alone would make a second candidate
-// update replace the first, losing candidates. So the value identifies the
-// exact message position — session, type and sequence — which leaves
-// replacement doing the one useful thing it can do here: a retransmission of a
-// message supersedes its own earlier attempt.
+// Within a session the value must distinguish every message: scoping by session
+// alone would make an offer replace the request that prompted it, and scoping by
+// session and type would make a second candidate update discard the first.
+//
+// Across sessions the opposite is needed. A session.request opens a conversation
+// with one peer, and a newer request supersedes an older one completely — the
+// earlier session is abandoned the moment its initiator tries again. Keeping
+// both means a responder subscribing later finds two live requests and answers
+// whichever the relay hands it first, which is how a peer ends up negotiating a
+// session its counterpart has already given up on. So an opening message is
+// keyed by recipient rather than by session: one live request per peer, always
+// the newest.
 func ReplaceableTag(sessionID string, messageType string, seq uint64) []string {
 	return []string{"d", fmt.Sprintf("%s:%s:%d", sessionID, messageType, seq)}
+}
+
+// OpeningTag builds the "d" tag for a message that opens a conversation.
+//
+// Keyed by recipient, so a newer request replaces the one before it rather than
+// accumulating alongside it. See ReplaceableTag for why the two differ.
+func OpeningTag(recipient domain.NostrPublicKey, messageType string) []string {
+	return []string{"d", fmt.Sprintf("open:%s:%s", recipient.String(), messageType)}
 }

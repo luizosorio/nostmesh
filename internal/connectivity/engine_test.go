@@ -405,3 +405,51 @@ func TestEngineRequiresSessionID(t *testing.T) {
 		t.Error("an engine without a session id must be refused")
 	}
 }
+
+// A peer-reflexive candidate is not deduplicated behind a server-reflexive one
+// at the same address.
+//
+// Probable() drops candidates that share a foundation, on the grounds that they
+// would behave identically. These do not: the srflx address is the mapping the
+// peer's NAT made toward its STUN observer, and the prflx address is the one it
+// actually reaches us through. Collapsing them would leave only the address
+// that does not work, and nothing would report an error — the candidate would
+// simply never be probed.
+func TestPeerReflexiveFoundationDiffersFromServerReflexive(t *testing.T) {
+	now := testNow()
+	engine := newTestEngine(t, &now)
+
+	announced := netip.MustParseAddrPort("203.0.113.20:40001")
+	working := netip.MustParseAddrPort("203.0.113.20:40002")
+
+	if err := engine.AddCandidate(Candidate{
+		ID:      "srflx",
+		Kind:    KindServerReflexive,
+		Address: announced,
+		Source:  "peer",
+	}); err != nil {
+		t.Fatalf("adding srflx: %v", err)
+	}
+	if err := engine.AddCandidate(Candidate{
+		ID:      "prflx",
+		Kind:    KindPeerReflexive,
+		Address: working,
+		Source:  "peer probe",
+	}); err != nil {
+		t.Fatalf("adding prflx: %v", err)
+	}
+
+	probable := engine.Probable()
+	if len(probable) != 2 {
+		t.Fatalf("%d candidates are probable, want both", len(probable))
+	}
+}
+
+// A path a packet actually traversed outranks one a stranger described.
+func TestPeerReflexiveOutranksServerReflexive(t *testing.T) {
+	addr := netip.MustParseAddrPort("203.0.113.20:40002").Addr()
+
+	if priorityFor(KindPeerReflexive, addr) >= priorityFor(KindServerReflexive, addr) {
+		t.Error("a peer-reflexive candidate must be tried before a server-reflexive one")
+	}
+}

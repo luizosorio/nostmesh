@@ -49,8 +49,10 @@ type UDPTransport struct {
 
 	// stun receives datagrams that are STUN responses rather than probes, so a
 	// shared observer can read them without racing the probe reader for the
-	// socket.
-	stun chan stunDatagram
+	// socket. probes is the same arrangement in reverse, for probes that arrive
+	// while the observer holds the socket.
+	stun   chan stunDatagram
+	probes chan stunDatagram
 }
 
 // stunDatagram is a STUN response handed to the observer.
@@ -86,9 +88,10 @@ func NewUDPTransport(port uint16) (*UDPTransport, error) {
 	}
 
 	return &UDPTransport{
-		conn: conn,
-		port: bound,
-		stun: make(chan stunDatagram, 4),
+		conn:   conn,
+		port:   bound,
+		stun:   make(chan stunDatagram, 4),
+		probes: make(chan stunDatagram, 8),
 	}, nil
 }
 
@@ -126,7 +129,19 @@ func (t *UDPTransport) Send(ctx context.Context, target netip.AddrPort, payload 
 // rather than returned here. Sharing the socket is what keeps the observed
 // address and the probed address referring to the same NAT mapping; the cost is
 // that this reader must sort the two apart.
+//
+// Callers that need only STUN — gathering runs before any probe is sent — use
+// ReceiveSTUN, which drives the same demultiplexer. Without a reader running,
+// nothing sorts arriving datagrams and a STUN response is never delivered: the
+// socket holds it and the observer times out waiting for it.
 func (t *UDPTransport) Receive(ctx context.Context) ([]byte, netip.AddrPort, error) {
+	// A probe sorted aside while the observer held the socket is taken first.
+	select {
+	case datagram := <-t.probes:
+		return datagram.payload, datagram.source, nil
+	default:
+	}
+
 	buf := make([]byte, maxDatagram)
 
 	for {
@@ -139,6 +154,12 @@ func (t *UDPTransport) Receive(ctx context.Context) ([]byte, netip.AddrPort, err
 		t.mu.Unlock()
 		if closed {
 			return nil, netip.AddrPort{}, ErrTransportClosed
+		}
+
+		select {
+		case datagram := <-t.probes:
+			return datagram.payload, datagram.source, nil
+		default:
 		}
 
 		// A short deadline rather than a blocking read: the socket must notice
@@ -178,6 +199,83 @@ func (t *UDPTransport) Receive(ctx context.Context) ([]byte, netip.AddrPort, err
 		}
 
 		return payload, normalized, nil
+	}
+}
+
+// ReceiveSTUN waits for a STUN response, sorting probes aside.
+//
+// It is the mirror of Receive: the same demultiplexer, with the two outcomes
+// swapped. Gathering needs it because it runs before any probe exists, so
+// nothing else is reading the socket — and a datagram nobody reads is a datagram
+// nobody receives.
+func (t *UDPTransport) ReceiveSTUN(ctx context.Context) ([]byte, netip.AddrPort, error) {
+	// A response already sorted aside by the probe reader is taken first.
+	select {
+	case datagram := <-t.stun:
+		return datagram.payload, datagram.source, nil
+	default:
+	}
+
+	buf := make([]byte, maxDatagram)
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, netip.AddrPort{}, err
+		}
+
+		t.mu.Lock()
+		closed := t.closed
+		t.mu.Unlock()
+		if closed {
+			return nil, netip.AddrPort{}, ErrTransportClosed
+		}
+
+		// Another reader may have sorted one aside while this one waited.
+		select {
+		case datagram := <-t.stun:
+			return datagram.payload, datagram.source, nil
+		default:
+		}
+
+		deadline := time.Now().Add(receivePollInterval)
+		if fromContext, ok := ctx.Deadline(); ok && fromContext.Before(deadline) {
+			deadline = fromContext
+		}
+		if err := t.conn.SetReadDeadline(deadline); err != nil {
+			return nil, netip.AddrPort{}, fmt.Errorf("setting read deadline: %w", err)
+		}
+
+		read, source, err := t.conn.ReadFromUDPAddrPort(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil, netip.AddrPort{}, ErrTransportClosed
+			}
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				continue
+			}
+			return nil, netip.AddrPort{}, fmt.Errorf("receiving: %w", err)
+		}
+
+		payload := make([]byte, read)
+		copy(payload, buf[:read])
+		normalized := netip.AddrPortFrom(source.Addr().Unmap(), source.Port())
+
+		if isSTUNMessage(payload) {
+			return payload, normalized, nil
+		}
+
+		// A probe arriving during gathering is kept for the checker rather than
+		// discarded: the peer may well start probing before this side finishes.
+		t.dispatchProbe(payload, normalized)
+	}
+}
+
+// dispatchProbe holds a probe that arrived while another reader was waiting.
+func (t *UDPTransport) dispatchProbe(payload []byte, source netip.AddrPort) {
+	select {
+	case t.probes <- stunDatagram{payload: payload, source: source}:
+	default:
 	}
 }
 

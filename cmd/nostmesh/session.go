@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
 )
 
@@ -17,6 +23,7 @@ func runConnect(args []string, stdout, stderr *output) int {
 	flags.SetOutput(stderr.w)
 	configPath := flags.String("config", "", "path to the configuration file (required)")
 	peerKey := flags.String("peer", "", "peer's Nostr public key, hex (required)")
+	timeout := flags.Duration("timeout", sessionTimeout, "how long to wait for the session to establish")
 
 	flags.Usage = func() {
 		stderr.printf("Usage: nostmesh connect --config <path> --peer <pubkey>\n\n" +
@@ -59,10 +66,105 @@ func runConnect(args []string, stdout, stderr *output) int {
 		return exitError
 	}
 
-	stderr.printf("nostmesh connect: relay transport is not wired yet; this arrives in M1.4\n")
-	stderr.printf("the peer is authorized and the handshake is implemented; what is missing\n")
-	stderr.printf("is publishing over relays, which needs the WebSocket client\n")
-	return exitError
+	// The pair settles which end opens the session: both are willing to do
+	// either, and the command name is not evidence about the peer.
+	return runSession(cfg, peer, orchestrator.RoleAuto, *timeout, stdout, stderr)
+}
+
+// retryDelay spaces out attempts, growing while they keep failing.
+//
+// A peer that is simply not ready yet costs one short pause; a condition that
+// cannot resolve — a port held by another process, a configuration the operator
+// must fix — backs off to a rate that keeps the failure visible in the log
+// without drowning it.
+func retryDelay(consecutive int) time.Duration {
+	if consecutive <= 0 {
+		return listenRetryInterval
+	}
+
+	delay := listenRetryInterval << min(consecutive-1, maxRetryDoublings)
+	return min(delay, maxListenRetryInterval)
+}
+
+const (
+	// listenRetryInterval separates one attempt from the next.
+	listenRetryInterval = 2 * time.Second
+
+	// maxListenRetryInterval caps the backoff, so a listener still notices a
+	// peer that becomes ready after a long outage.
+	maxListenRetryInterval = 30 * time.Second
+
+	// maxRetryDoublings bounds the shift, so the delay cannot overflow.
+	maxRetryDoublings = 8
+)
+
+// runSession builds the runtime and drives one session to a carrying tunnel.
+//
+// Interrupting it tears down cleanly rather than leaving a half-configured
+// interface: a signal is a request to stop, not permission to abandon kernel
+// state.
+func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator.Role,
+	timeout time.Duration, stdout, stderr *output,
+) int {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if timeout > 0 {
+		var timed context.CancelFunc
+		ctx, timed = context.WithTimeout(ctx, timeout)
+		defer timed()
+	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	stdout.printf("connecting to %s\n", peer.Short())
+
+	// Progress is printed as it happens. A session spans two hosts and several
+	// layers, and every failure in it looks the same from outside — a wait that
+	// ends empty — so saying what did arrive is most of the diagnosis.
+	trace := func(line string) { stdout.printf("  %s\n", line) }
+
+	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, trace, nil)
+	if err != nil {
+		stderr.printf("nostmesh: %v\n", err)
+		return exitError
+	}
+	defer runtime.cleanup()
+
+	// Relays are kept connected for the duration. A relay that drops mid-session
+	// is redialled and resubscribed, since a peer may still be publishing to it.
+	go runtime.set.Supervise(ctx)
+
+	// Some relays answer a subscription from storage and then never push what
+	// arrives afterwards. Polling reissues the subscription so those still
+	// deliver, at the cost of a small query every few seconds.
+	go runtime.set.Poll(ctx)
+
+	if err := runtime.driver.Connect(ctx, peer, role); err != nil {
+		stderr.printf("nostmesh: %v\n", err)
+
+		// What this node managed to publish is half the diagnosis. A session
+		// that failed having published nothing is a different problem from one
+		// that published and was not answered.
+		for _, line := range runtime.plane.Publications() {
+			stderr.printf("  published %s\n", line)
+		}
+		return exitError
+	}
+
+	stdout.printf("tunnel established with %s\n", peer.Short())
+	stdout.printf("run 'nostmesh status --config <path>' to inspect it\n")
+	return exitOK
 }
 
 // runSessions lists what the node knows about its sessions.

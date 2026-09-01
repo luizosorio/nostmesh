@@ -42,6 +42,7 @@ type RelaySet struct {
 
 	mu             sync.Mutex
 	subscriptionID string
+	since          time.Time
 	supervising    bool
 }
 
@@ -155,6 +156,34 @@ func (s *RelaySet) Connect(ctx context.Context) error {
 	return nil
 }
 
+// Dropped reports how many deliveries the set discarded for want of a reader.
+//
+// A non-zero count means the relays delivered messages this node then threw
+// away, which looks exactly like the peer never sending them. It belongs in any
+// report of why a wait ended empty.
+func (s *RelaySet) Dropped() int {
+	var total int
+	for _, relay := range s.relays {
+		total += relay.Dropped()
+	}
+	return total
+}
+
+// ClosedSubscriptions reports subscriptions the relays ended, and the last
+// reason any of them gave.
+func (s *RelaySet) ClosedSubscriptions() (int, string) {
+	var total int
+	var reason string
+	for _, relay := range s.relays {
+		count, why := relay.SubscriptionClosed()
+		total += count
+		if why != "" {
+			reason = why
+		}
+	}
+	return total, reason
+}
+
 // Connected reports how many relays are currently up.
 func (s *RelaySet) Connected() int {
 	var up int
@@ -172,19 +201,48 @@ func (s *RelaySet) Connected() int {
 // only what concerns this node rather than every message of this kind on the
 // network.
 func (s *RelaySet) SubscribeToInbox(ctx context.Context, self domain.NostrPublicKey) error {
-	subscriptionID, err := randomSubscriptionID()
-	if err != nil {
-		return err
+	// The identifier is generated once and reused for every later reissue.
+	//
+	// A relay caps concurrent subscriptions per connection. Sending a fresh
+	// identifier on each poll opens a new one every interval, and once the cap
+	// is reached the relay refuses or closes them — after which the client
+	// believes it is subscribed and receives nothing at all. Reusing the
+	// identifier makes a reissue replace the subscription rather than add one.
+	s.mu.Lock()
+	subscriptionID := s.subscriptionID
+	s.mu.Unlock()
+
+	if subscriptionID == "" {
+		generated, err := randomSubscriptionID()
+		if err != nil {
+			return err
+		}
+		subscriptionID = generated
 	}
+
+	// One envelope lifetime back, plus an allowance for clock skew.
+	//
+	// The skew allowance is not padding. This window is computed from the local
+	// clock, but it filters events stamped by the sender's clock, and the two
+	// disagree in practice — a host running two minutes behind publishes events
+	// that a strictly computed window silently excludes. The session then fails
+	// with no message ever arriving, which looks like a network problem and is
+	// not one.
+	//
+	// It reuses the protocol's own tolerance rather than defining a second one:
+	// a message this filter admits is exactly one the validator would accept,
+	// and two constants that could drift apart would eventually disagree.
+	since := s.clock().Add(-inboxLookback - protocol.MaxClockSkew)
 
 	s.mu.Lock()
 	s.self = self
 	s.subscriptionID = subscriptionID
+	s.since = since
 	s.mu.Unlock()
 
 	var subscribed int
 	for _, relay := range s.relays {
-		if err := relay.RequestEvents(ctx, subscriptionID, inboxFilter(self)); err == nil {
+		if err := relay.RequestEvents(ctx, subscriptionID, inboxFilter(self, since)); err == nil {
 			subscribed++
 		}
 	}
@@ -196,10 +254,65 @@ func (s *RelaySet) SubscribeToInbox(ctx context.Context, self domain.NostrPublic
 }
 
 // inboxFilter selects events addressed to a node.
-func inboxFilter(self domain.NostrPublicKey) map[string]any {
+//
+// The `since` bound is not an optimization. Control messages are short-lived and
+// every one of them expires, but a relay keeps them and replays the whole
+// backlog to each new subscription. Without a lower bound a node starting up
+// receives every message it was ever sent, all of them expired and all of them
+// rejected — and the live message it is actually waiting for arrives somewhere
+// in that flood, or not at all.
+//
+// The bound is one envelope lifetime back rather than "now": a message published
+// moments before this node subscribed is still valid and still wanted.
+func inboxFilter(self domain.NostrPublicKey, since time.Time) map[string]any {
 	return map[string]any{
 		"kinds": []int{protocol.ExperimentalKind},
 		"#p":    []string{self.String()},
+		"since": since.Unix(),
+	}
+}
+
+// PollInterval reports how often the subscription is reissued.
+//
+// Exposed because anything waiting for a message to arrive has to outlast it: a
+// wait shorter than one interval can close before the poll that would have
+// delivered the message.
+func PollInterval() time.Duration { return pollInterval }
+
+// Poll reissues the inbox subscription periodically.
+//
+// NIP-01 relays are expected to push events matching an open subscription as
+// they arrive, and most do. Some do not: they answer the initial query from
+// storage and then stay silent for the subscription's lifetime. Against one of
+// those, a responder holding an open subscription never learns that a request
+// arrived, even though the relay stored it and will return it to the very next
+// query.
+//
+// Reissuing the subscription turns that silence into a poll. It costs one small
+// query per interval and makes the client work against both behaviours, which
+// is the right trade when the alternative is a session that hangs depending on
+// which relay the operator configured.
+func (s *RelaySet) Poll(ctx context.Context) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			self := s.self
+			s.mu.Unlock()
+
+			if self.IsZero() {
+				continue
+			}
+			// Errors are not reported: a relay that refuses one poll is
+			// retried on the next tick, and the supervisor handles a relay
+			// that has genuinely gone away.
+			_ = s.SubscribeToInbox(ctx, self)
+		}
 	}
 }
 
@@ -273,16 +386,28 @@ func (s *RelaySet) resubscribe(ctx context.Context, relay *WebSocketRelay) {
 	s.mu.Lock()
 	subscriptionID := s.subscriptionID
 	self := s.self
+	since := s.since
 	s.mu.Unlock()
 
 	if subscriptionID == "" || self.IsZero() {
 		return
 	}
-	_ = relay.RequestEvents(ctx, subscriptionID, inboxFilter(self))
+	_ = relay.RequestEvents(ctx, subscriptionID, inboxFilter(self, since))
 }
 
-// supervisionInterval is how often a connected relay is rechecked.
-const supervisionInterval = 5 * time.Second
+const (
+	// supervisionInterval is how often a connected relay is rechecked.
+	supervisionInterval = 5 * time.Second
+
+	// inboxLookback bounds how far back a subscription asks for messages. It
+	// matches the control protocol's envelope lifetime: anything older is
+	// expired and would be refused anyway.
+	inboxLookback = 5 * time.Minute
+
+	// pollInterval is how often the subscription is reissued, so a relay that
+	// does not push live events still delivers within a bounded delay.
+	pollInterval = 3 * time.Second
+)
 
 // randomSubscriptionID produces an identifier for a relay subscription.
 //

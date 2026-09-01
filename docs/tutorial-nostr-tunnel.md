@@ -112,21 +112,43 @@ Discovery tries local interfaces, then a static endpoint, then the router, then
 recent endpoints, and only then a STUN observer. A host with a routable address
 **never contacts an observer**, so no third party learns it exists.
 
-## Step 3: connect
+## Step 3: run the service on both hosts
 
 ```bash
-sudo nostmesh connect --config /etc/nostmesh.json --peer <host B's public key>
+sudo nostmesh serve --config /etc/nostmesh.json
 ```
+
+Run it on **both** hosts. Either side may open a session at any time, and the
+other has to be ready to answer — which is why this is a service rather than a
+command that connects once and returns. Which end opens is settled from the two
+Nostr keys, so both reach the same answer without exchanging a message.
 
 Both sides need each other authorized. If B has not authorized A, the handshake
 is refused at B — with no state created and nothing applied to either kernel.
 
+It runs in the foreground here so you can watch it. On a node that should stay
+reachable, run it under systemd: see `examples/nostmesh.service`.
+
+Once a session is up, the service **holds** it and reconnects if it drops. There
+is no step to keep it alive.
+
 ## Step 4: check
 
 ```bash
-nostmesh sessions --config /etc/nostmesh.json
+nostmesh state --config /etc/nostmesh.json
 sudo nostmesh status --config /etc/nostmesh.json
 ```
+
+`state` asks the running service what it is doing:
+
+```
+PEER                 SHORT      PHASE          ATTEMPTS  SINCE                  HANDSHAKE
+host-b               a1cebb55   established           2  2026-09-01T12:24:20Z   55s ago
+```
+
+`HANDSHAKE` is the age of the last data-plane handshake. A live tunnel refreshes
+it every couple of minutes on its own, so a number that keeps growing is the
+session dying.
 
 `status` shows what is configured beside what the kernel reports. The gap is the
 useful part: a peer configured with no handshake means the tunnel is set up and
@@ -146,7 +168,7 @@ sudo nostmesh doctor --config /etc/nostmesh.json
 ✓ authorized peers       1 authorized
 ✓ relays                 3 configured
 ✓ wireguard              control socket available
-! interface nm0          not present; run 'nostmesh connect' to establish a session
+! interface nm0          not present; run 'nostmesh up' to bring the tunnel up
 ```
 
 `doctor` changes nothing and its output carries no key material, so it is safe
