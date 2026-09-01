@@ -13,4 +13,6 @@ import (
 // place that legitimately knows about both.
 func init() {
 	identity.DeriveNostrPublicKey = nostr.DerivePublicKey
+	identity.DecodeNostrPrivateKey = nostr.DecodePrivateKey
+	identity.EncodeNostrPublicKey = nostr.EncodePublicKey
 }

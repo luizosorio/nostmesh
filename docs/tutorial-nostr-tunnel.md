@@ -51,6 +51,10 @@ The public key it prints is how the other host will name you. It is a real
 secp256k1 key: exchange it however you like — the protocol assumes you already
 know who you want to talk to.
 
+Already have a Nostr identity? `nostmesh identity import` adopts it instead. See
+[identity](identity.md) for what these keys are, where they live, and what to
+weigh before reusing a personal one.
+
 ## Step 2: configuration
 
 ```bash

@@ -47,6 +47,13 @@ func commands() []command {
 	}
 }
 
+// stdin is where a subcommand reads input a flag must not carry.
+//
+// A package variable rather than a parameter threaded through every subcommand:
+// exactly one of them reads input, and widening the signature of all of them for
+// that one would be a change with no other purpose. Tests substitute it.
+var stdin io.Reader = os.Stdin
+
 func run(args []string, stdout, stderr io.Writer) int {
 	out := &output{w: stdout}
 	errOut := &output{w: stderr}

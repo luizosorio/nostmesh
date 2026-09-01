@@ -19,7 +19,17 @@ useDefault = true
 id = "nostmesh-private-key-material"
 description = "A private key must never be committed"
 # Matches a field that names a private key alongside a base64 or hex value.
-regex = '''(?i)(private[_-]?key|privkey|secret[_-]?key|nsec1)["'\s:=]+[A-Za-z0-9+/=]{32,}'''
+regex = '''(?i)(private[_-]?key|privkey|secret[_-]?key)["'\s:=]+[A-Za-z0-9+/=]{32,}'''
+tags = ["key", "private"]
+
+[[rules]]
+id = "nostmesh-bech32-private-key"
+description = "A Nostr private key must never be committed"
+# A key in the form clients export is one unbroken string: the prefix runs
+# straight into the payload with no separator, so the field-and-value rule above
+# cannot match it. Bech32's own alphabet excludes "1", "b", "i" and "o", which
+# is what keeps this from matching ordinary prose after the prefix.
+regex = '''nsec1[023456789acdefghjklmnpqrstuvwxyz]{32,}'''
 tags = ["key", "private"]
 
 [allowlist]
