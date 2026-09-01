@@ -5,12 +5,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
@@ -63,6 +66,7 @@ func runDoctor(args []string, stdout, stderr *output) int {
 			checkPeers(cfg),
 			checkAuthorizedPeers(cfg),
 			checkRelays(cfg),
+			checkClock(cfg),
 		)
 		checks = append(checks, checkWireGuard()...)
 	}
@@ -193,6 +197,79 @@ func checkRelays(cfg config.Config) checkResult {
 		return checkResult{"relays", statusOK, fmt.Sprintf("%d configured", count)}
 	}
 }
+
+// checkClock compares this host's clock against an external reference.
+//
+// A skewed clock breaks sessions in a way that looks like a network fault: this
+// node stamps its messages with a time the peer's filters exclude, so the peer
+// receives nothing and both sides time out with no error to show. It cost a full
+// debugging session to find once, and it is invisible without a check like this.
+//
+// The reference is an HTTP Date header from a relay, which is already configured
+// and already trusted for availability. It is not a time source in any strict
+// sense — a second of network delay is well inside what matters here, and what
+// is being detected is minutes of drift, not milliseconds.
+func checkClock(cfg config.Config) checkResult {
+	if len(cfg.Node.Relays) == 0 {
+		return checkResult{"clock", statusWarn, "no relay configured to compare against"}
+	}
+
+	reference, err := relayTime(cfg.Node.Relays[0])
+	if err != nil {
+		return checkResult{"clock", statusWarn, fmt.Sprintf("could not reach a reference: %v", err)}
+	}
+
+	skew := time.Since(reference)
+	if skew < 0 {
+		skew = -skew
+	}
+
+	switch {
+	case skew > protocol.MaxClockSkew:
+		return checkResult{"clock", statusError, fmt.Sprintf(
+			"%s off from %s; messages this node publishes fall outside the window peers accept, and sessions fail with nothing arriving",
+			skew.Round(time.Second), cfg.Node.Relays[0])}
+	case skew > clockWarnThreshold:
+		return checkResult{"clock", statusWarn, fmt.Sprintf(
+			"%s off from %s; still within tolerance, but drifting", skew.Round(time.Second), cfg.Node.Relays[0])}
+	default:
+		return checkResult{"clock", statusOK, fmt.Sprintf("within %s of %s",
+			skew.Round(time.Second), cfg.Node.Relays[0])}
+	}
+}
+
+// relayTime reads a relay's clock from its HTTP Date header.
+func relayTime(relayURL string) (time.Time, error) {
+	endpoint := strings.Replace(strings.Replace(relayURL, "wss://", "https://", 1), "ws://", "http://", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), clockProbeTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	stamp := response.Header.Get("Date")
+	if stamp == "" {
+		return time.Time{}, errors.New("no Date header")
+	}
+	return http.ParseTime(stamp)
+}
+
+const (
+	// clockWarnThreshold reports drift long before it breaks anything.
+	clockWarnThreshold = time.Minute
+
+	// clockProbeTimeout bounds the reference lookup.
+	clockProbeTimeout = 5 * time.Second
+)
 
 func checkPeers(cfg config.Config) checkResult {
 	if len(cfg.Peers) == 0 {

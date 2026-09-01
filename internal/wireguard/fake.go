@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 )
@@ -23,16 +24,27 @@ type FakeController struct {
 	// FailOn makes the named method fail, so callers can exercise error paths.
 	FailOn map[string]error
 
+	// failNext makes a method fail a bounded number of times and then recover.
+	failNext    map[string]int
+	failNextErr map[string]error
+
 	// Calls records every method invoked, in order, so a test can assert that
 	// compensation ran in reverse.
 	Calls []string
+
+	// handshakeOnApply makes an applied peer report a completed handshake.
+	// Off by default: see HandshakeOnApply.
+	handshakeOnApply bool
+	handshakeAt      time.Time
 }
 
 // NewFakeController returns an empty fake host.
 func NewFakeController() *FakeController {
 	return &FakeController{
-		interfaces: make(map[string]*InterfaceState),
-		FailOn:     make(map[string]error),
+		interfaces:  make(map[string]*InterfaceState),
+		FailOn:      make(map[string]error),
+		failNext:    make(map[string]int),
+		failNextErr: make(map[string]error),
 	}
 }
 
@@ -72,10 +84,57 @@ func (f *FakeController) PeerCount(name string) int {
 
 func (f *FakeController) record(method string) error {
 	f.Calls = append(f.Calls, method)
+
+	// A budgeted failure is consumed before the permanent one, so a test can
+	// model a call that fails a few times and then recovers — which is what a
+	// transient netlink error looks like, and what distinguishes it from an
+	// interface that is really gone.
+	if remaining, ok := f.failNext[method]; ok && remaining > 0 {
+		f.failNext[method] = remaining - 1
+		return f.failNextErr[method]
+	}
 	if err, ok := f.FailOn[method]; ok {
 		return err
 	}
 	return nil
+}
+
+// FailNext makes the named method fail its next n calls and then recover.
+//
+// FailOn fails every call, which cannot express a transient fault. A caller
+// that tolerates a few failures before acting has no way to be tested against
+// a fake that only knows "always" and "never".
+func (f *FakeController) FailNext(method string, n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.failNext[method] = n
+	f.failNextErr[method] = err
+}
+
+// AdvanceHandshake moves a peer's last handshake, modelling a rekey.
+//
+// The real data plane refreshes this on its own while the path works, and
+// stops when it dies. Without a way to move it, a fake reports a handshake
+// frozen at the moment it was applied: a hold checking for staleness would then
+// pass or fail according to the test's clock alone, and would agree with
+// whatever the implementation happened to do.
+func (f *FakeController) AdvanceHandshake(name string, key domain.WireGuardPublicKey, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	iface, known := f.interfaces[name]
+	if !known {
+		return fmt.Errorf("%w: %s", ErrInterfaceNotFound, name)
+	}
+
+	for i := range iface.Peers {
+		if iface.Peers[i].PublicKey == key {
+			iface.Peers[i].LastHandshake = at
+			return nil
+		}
+	}
+	return fmt.Errorf("peer %s is not on %s", key.Short(), name)
 }
 
 // EnsureInterface creates or updates the simulated interface.
@@ -126,13 +185,37 @@ func (f *FakeController) ApplyPeer(_ context.Context, name string, spec PeerSpec
 		}
 	}
 
-	iface.Peers = append(iface.Peers, PeerState{
+	peer := PeerState{
 		PublicKey:           spec.PublicKey,
 		Endpoint:            spec.Endpoint,
 		AllowedIPs:          spec.AllowedIPs,
 		PersistentKeepalive: spec.PersistentKeepalive,
-	})
+	}
+
+	// A handshake is reported only when a test asks for one. The default is a
+	// peer that is configured and carries nothing, which is the real failure
+	// this fake must be able to reproduce: a fake that handshook automatically
+	// would make every caller look successful and would never exercise the
+	// check that distinguishes a configured tunnel from a working one.
+	if f.handshakeOnApply {
+		peer.LastHandshake = f.handshakeAt
+	}
+
+	iface.Peers = append(iface.Peers, peer)
 	return nil
+}
+
+// HandshakeOnApply makes applied peers report a completed handshake.
+//
+// It exists so a test can reach the state that follows a working data plane
+// without a kernel. It must be set deliberately: leaving it off is what lets a
+// test assert that a tunnel carrying nothing is detected.
+func (f *FakeController) HandshakeOnApply(at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.handshakeOnApply = true
+	f.handshakeAt = at
 }
 
 // RemovePeer removes a peer; removing an absent one is not an error.
@@ -172,7 +255,14 @@ func (f *FakeController) ObserveInterface(_ context.Context, name string) (Inter
 	if !ok {
 		return InterfaceState{}, fmt.Errorf("%w: %s", ErrInterfaceNotFound, name)
 	}
-	return *iface, nil
+
+	// The peers are copied, not shared. A real observation is a snapshot taken
+	// from the kernel; handing out the live slice would let a caller read it
+	// while the fake mutates it, which is a property of the fake rather than of
+	// anything under test.
+	observed := *iface
+	observed.Peers = append([]PeerState(nil), iface.Peers...)
+	return observed, nil
 }
 
 // RemoveInterface deletes a simulated interface, refusing one not owned.

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,9 +15,30 @@ import (
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
-type fixedClock struct{ now time.Time }
+// fixedClock is a clock a test moves deliberately.
+//
+// Guarded because a held session is observed from another goroutine while the
+// test advances time, and an unsynchronised read of the same field would be a
+// race in the test rather than in what it measures.
+type fixedClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
 
-func (c *fixedClock) Now() time.Time { return c.now }
+func (c *fixedClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.now
+}
+
+// advance moves the clock forward.
+func (c *fixedClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.now = c.now.Add(d)
+}
 
 // deterministicKey supplies a fixed tunnel key so tests do not depend on
 // randomness.

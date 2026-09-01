@@ -104,6 +104,16 @@ type AuthorizedPeer struct {
 	// absent from the list is refused.
 	Actions []string `toml:"actions" json:"actions"`
 
+	// AllowedIPs lists the prefixes this node will accept from the peer through
+	// a negotiated tunnel.
+	//
+	// It belongs here rather than under [[peers]] because a negotiated session's
+	// tunnel key is ephemeral and unknown in advance, so the only stable way to
+	// name the far side is its Nostr identity. Like every other AllowedIPs in
+	// this configuration it is local intent: a peer asking to route a prefix is
+	// making a request, and this is the answer, decided ahead of time.
+	AllowedIPs []string `toml:"allowed_ips" json:"allowed_ips,omitempty"`
+
 	// Revoked withdraws the grant while keeping the record, so an operator can
 	// see a peer was deliberately removed rather than never added.
 	Revoked bool `toml:"revoked" json:"revoked,omitempty"`
