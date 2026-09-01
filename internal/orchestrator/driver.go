@@ -239,6 +239,15 @@ type DriverOptions struct {
 	// answer: the session is already up, and this only has to notice it ending.
 	HoldPollInterval time.Duration
 
+	// RequestWait bounds how long a responder waits for a peer to open a
+	// session before giving the attempt back to its caller.
+	//
+	// It is separate from HandshakeTimeout, which bounds the steps of a
+	// negotiation already under way. This one bounds waiting for a negotiation
+	// to begin at all, and it exists because that wait is the one that can
+	// last indefinitely with nothing wrong.
+	RequestWait time.Duration
+
 	// HandshakeStaleAfter is how long without a refreshed handshake means the
 	// session is gone.
 	//
@@ -264,6 +273,9 @@ func (o *DriverOptions) applyDefaults() {
 	}
 	if o.HandshakeTimeout == 0 {
 		o.HandshakeTimeout = 60 * time.Second
+	}
+	if o.RequestWait == 0 {
+		o.RequestWait = 90 * time.Second
 	}
 	if o.HoldPollInterval == 0 {
 		o.HoldPollInterval = 5 * time.Second
@@ -365,6 +377,13 @@ const (
 	// will move first.
 	RoleAuto
 )
+
+// ErrNoRequest reports a responder whose wait for a peer ended with none.
+//
+// It is not a failure of the peer or of this node: it is the ordinary outcome
+// of waiting for someone who did not come. The caller distinguishes it so it
+// can take the other role next time rather than wait the same way again.
+var ErrNoRequest = errors.New("no peer opened a session within the wait")
 
 // resolveRole settles which end opens the session.
 //
@@ -769,6 +788,25 @@ type pendingRequest struct {
 // arrives, so everything afterwards — the manager entry, the handshake, the
 // messages published — refers to the same session.
 func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
+	// The wait is bounded even when the handshake timeout is not.
+	//
+	// Both ends of a pair are willing to answer, and resolveRole settles which
+	// one opens. But after both sides lose a session at once, each returns to
+	// its role and the responder blocks here — and if the initiator's own
+	// attempt fails for any reason, nobody is left to send a request. Observed
+	// between two real hosts: both sides sat in this wait, and restarting one
+	// of them did not help, because the other never came back to notice.
+	//
+	// Returning after a bound is what breaks that. The caller rebuilds and
+	// tries again, republishing its subscription and, on the initiating side,
+	// its request.
+	waited := ctx
+	if d.options.RequestWait > 0 {
+		var cancel context.CancelFunc
+		waited, cancel = context.WithTimeout(ctx, d.options.RequestWait)
+		defer cancel()
+	}
+
 	// A relay answers a new subscription with everything it already holds, so
 	// a request from an earlier attempt arrives first and looks perfectly
 	// valid: correctly signed, correctly addressed, not yet expired.
@@ -793,8 +831,14 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	// keeps only the newest — so a responder that answered a dead session and
 	// failed will find the live one waiting on its next attempt.
 	for {
-		request, err := d.readRequest(ctx)
+		request, err := d.readRequest(waited)
 		if err != nil {
+			// The caller's own cancellation is shutdown and stays itself. The
+			// bound expiring is a different thing, and is named so the caller
+			// can respond by taking the other role.
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("%w: waited %s", ErrNoRequest, d.options.RequestWait)
+			}
 			return nil, err
 		}
 

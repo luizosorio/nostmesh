@@ -509,6 +509,12 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	w.log.Info("worker started", slog.String("event", "peer.worker.started"))
 	w.observe("starting", "", 0)
 
+	// Both ends are willing to do either job, and resolveRole settles which one
+	// normally opens. A responder whose wait ends with nobody having called
+	// takes the other role next time: after both sides lose a session at once,
+	// each would otherwise return to waiting and neither would ever call.
+	role := orchestrator.RoleAuto
+
 	var consecutive int
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
@@ -518,12 +524,23 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 
 		started := time.Now()
 		w.observe("connecting", "", attempt)
-		err := w.attempt(ctx, cfg, answered)
+		err := w.attempt(ctx, cfg, answered, role)
+		role = roleAfter(err)
 
 		switch {
 		case ctx.Err() != nil:
 			w.log.Info("worker stopped", slog.String("event", "peer.worker.stopped"))
 			return
+
+		case errors.Is(err, orchestrator.ErrNoRequest):
+			// Nobody called. Not a failure — but waiting the same way again is
+			// how two nodes that both dropped sit facing each other forever, so
+			// this one calls next time.
+			consecutive = 0
+			w.observe("connecting", err.Error(), attempt)
+			w.log.Info("no peer opened a session; opening one next",
+				slog.String("event", "session.waited"),
+				slog.String("reason", err.Error()))
 
 		case errors.Is(err, orchestrator.ErrSessionDropped):
 			// A session that ran and then died is not a failed attempt. Backing
@@ -559,8 +576,26 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	}
 }
 
+// roleAfter decides which role to take after an attempt ended.
+//
+// A responder whose wait ended with nobody having called takes the other role
+// next time. resolveRole is a function of the two keys alone, so the
+// higher-keyed node is otherwise always the responder — and after both ends
+// lose a session at once, each returns to its role and neither ever calls.
+//
+// Any other outcome goes back to letting the pair decide. Staying the initiator
+// would mean never answering a peer that restarted and opened one itself.
+func roleAfter(err error) orchestrator.Role {
+	if errors.Is(err, orchestrator.ErrNoRequest) {
+		return orchestrator.RoleInitiator
+	}
+	return orchestrator.RoleAuto
+}
+
 // attempt builds a runtime and drives one session.
-func (w *peerWorker) attempt(ctx context.Context, cfg config.Config, answered *orchestrator.AnsweredSessions) error {
+func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
+	answered *orchestrator.AnsweredSessions, role orchestrator.Role,
+) error {
 	trace := func(line string) {
 		w.log.Debug(line, slog.String("event", "session.trace"))
 	}
@@ -574,9 +609,7 @@ func (w *peerWorker) attempt(ctx context.Context, cfg config.Config, answered *o
 	go runtime.set.Supervise(ctx)
 	go runtime.set.Poll(ctx)
 
-	// The pair settles which end opens the session. Both are always willing to
-	// answer, which is the whole reason this runs as a service.
-	if err := runtime.driver.Connect(ctx, w.peer, orchestrator.RoleAuto); err != nil {
+	if err := runtime.driver.Connect(ctx, w.peer, role); err != nil {
 		return err
 	}
 

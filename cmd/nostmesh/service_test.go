@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -361,5 +362,26 @@ func TestARevocationNoticeNamesTheSession(t *testing.T) {
 	}
 	if session == "" {
 		t.Error("no session was recorded, so a revocation names nothing and the peer is never told")
+	}
+}
+
+// A worker that waited for a peer that never called opens the session itself
+// next time.
+//
+// resolveRole is a function of the two keys alone, so the higher-keyed node is
+// always the responder. After both sides lose a session at once, each returns
+// to its role and the responder waits — forever, if the other side is not
+// calling. Taking the initiator role after a fruitless wait is what breaks it.
+func TestAFruitlessWaitMakesTheWorkerOpenTheNextSession(t *testing.T) {
+	if got := roleAfter(orchestrator.ErrNoRequest); got != orchestrator.RoleInitiator {
+		t.Errorf("after waiting for nobody the worker waits again instead of calling: role %v", got)
+	}
+
+	// Every other ending goes back to letting the pair decide. Staying the
+	// initiator would mean never answering a peer that restarted and called.
+	for _, err := range []error{nil, orchestrator.ErrSessionDropped, errors.New("relay is down")} {
+		if got := roleAfter(err); got != orchestrator.RoleAuto {
+			t.Errorf("roleAfter(%v) = %v, want the pair to decide", err, got)
+		}
 	}
 }
