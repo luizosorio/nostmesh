@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -895,25 +896,37 @@ func (d *Driver) consumePeerCandidates(ctx context.Context, engine *connectivity
 		return errors.New("candidate message carries no candidates")
 	}
 
-	var accepted int
+	var (
+		accepted int
+		refused  []string
+	)
+
 	for _, wire := range delivery.Payload.Candidate.Added {
 		candidate, convertErr := toConnectivity(wire, peer.Short())
 		if convertErr != nil {
 			// An unusable candidate is dropped, not fatal: the peer may offer
-			// several and one being malformed says nothing about the rest.
+			// several and one being malformed says nothing about the rest. The
+			// reason is kept, because "the peer offered no usable candidate"
+			// says nothing about which of several rules refused them.
+			refused = append(refused, fmt.Sprintf("%s: %v", wire.Address, convertErr))
 			continue
 		}
 		// AddCandidate refuses loopback, multicast and unspecified addresses,
 		// so a peer cannot aim this node's probes at something that is not a
 		// routable peer.
 		if addErr := engine.AddCandidate(candidate); addErr != nil {
+			refused = append(refused, fmt.Sprintf("%s: %v", wire.Address, addErr))
 			continue
 		}
 		accepted++
 	}
 
 	if accepted == 0 {
-		return fmt.Errorf("%w: the peer offered no usable candidate", ErrNoValidPath)
+		if len(refused) == 0 {
+			return fmt.Errorf("%w: the peer sent an empty candidate list", ErrNoValidPath)
+		}
+		return fmt.Errorf("%w: none of the peer's %d candidate(s) were usable: %s",
+			ErrNoValidPath, len(refused), strings.Join(refused, "; "))
 	}
 	return nil
 }
