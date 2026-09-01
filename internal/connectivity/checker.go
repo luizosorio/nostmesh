@@ -37,8 +37,20 @@ type Checker struct {
 	limits    Limits
 	clock     func() time.Time
 
-	// outstanding maps a candidate id to the challenge awaiting an answer.
-	outstanding map[string]Challenge
+	// outstanding maps a nonce to the challenge awaiting an answer.
+	//
+	// Keyed by nonce rather than by candidate, because a candidate is probed
+	// once per round while a reply to the previous round may still be in
+	// flight. Keying by candidate overwrites the earlier nonce, and the reply
+	// that then arrives matches nothing and is discarded — on a fast path that
+	// is most of them, and the candidate never verifies despite answering
+	// correctly every time.
+	//
+	// Entries are removed on the answer that matches. An unanswered one stays
+	// until the run ends, which is bounded: a candidate is probed at most
+	// MaxAttemptsPerCandidate times and there are at most MaxCandidates of
+	// them, so the map cannot outgrow their product.
+	outstanding map[[NonceSize]byte]pendingCheck
 
 	// counters guards the tallies below, separately from mu.
 	//
@@ -87,7 +99,7 @@ func NewChecker(opts CheckerOptions) (*Checker, error) {
 		key:         opts.Key,
 		limits:      opts.Limits,
 		clock:       opts.Clock,
-		outstanding: make(map[string]Challenge),
+		outstanding: make(map[[NonceSize]byte]pendingCheck),
 	}, nil
 }
 
@@ -162,6 +174,12 @@ func (c *Checker) Run(ctx context.Context) (CheckResult, error) {
 	}
 }
 
+// pendingCheck is a challenge in flight and the candidate it probes.
+type pendingCheck struct {
+	candidateID string
+	challenge   Challenge
+}
+
 type probeArrival struct {
 	payload []byte
 	source  netip.AddrPort
@@ -202,7 +220,7 @@ func (c *Checker) sendChallenge(ctx context.Context, candidate Candidate) error 
 	}
 
 	c.mu.Lock()
-	c.outstanding[candidate.ID] = challenge
+	c.outstanding[challenge.Nonce] = pendingCheck{candidateID: candidate.ID, challenge: challenge}
 	c.mu.Unlock()
 
 	return nil
@@ -375,26 +393,27 @@ func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Du
 		return 0, false
 	}
 
-	for id, challenge := range c.outstanding {
-		if err := VerifyResponse(challenge, response); err != nil {
-			continue
-		}
+	// The nonce names the exact challenge this answers, so there is no scan and
+	// no ambiguity about which round it belongs to.
+	pending, known := c.outstanding[response.Nonce]
+	if known {
+		if err := VerifyResponse(pending.challenge, response); err == nil {
+			// Confirm the datagram physically came back from the address
+			// probed. The tag proves what the responder claimed; this proves
+			// where it actually arrived from, and the two are independent.
+			if !c.addressMatches(pending.candidateID, source) {
+				c.countDrop(fmt.Sprintf("response for %s arrived from %s", pending.candidateID, source))
+				return 0, false
+			}
 
-		// Confirm the datagram physically came back from the address probed.
-		// The tag proves what the responder claimed; this proves where it
-		// actually arrived from, and the two are independent.
-		if !c.addressMatches(id, source) {
-			c.countDrop(fmt.Sprintf("response for %s arrived from %s", id, source))
-			continue
-		}
+			roundTrip := c.clock().Sub(pending.challenge.SentAt)
+			delete(c.outstanding, response.Nonce)
 
-		roundTrip := c.clock().Sub(challenge.SentAt)
-		delete(c.outstanding, id)
-
-		if err := c.engine.RecordSuccess(id, roundTrip); err != nil {
-			return 0, false
+			if err := c.engine.RecordSuccess(pending.candidateID, roundTrip); err != nil {
+				return 0, false
+			}
+			return roundTrip, true
 		}
-		return roundTrip, true
 	}
 
 	// Nothing matched. Counting it matters as much as the cases above: a

@@ -460,3 +460,38 @@ func TestDiscardingAResponseDoesNotDeadlock(t *testing.T) {
 		t.Errorf("discarded responses are invisible: %s", summary)
 	}
 }
+
+// A reply that arrives after its candidate was probed again must still verify.
+//
+// Run re-probes every probable candidate each round while waiting only
+// CheckTimeout for a single datagram, so on a fast path a reply routinely
+// arrives after the next round has already gone out. Holding one challenge per
+// candidate discards those replies: measured between two hosts 0.36 ms apart,
+// every response authenticated, matched no outstanding challenge, and the
+// candidate never verified despite the peer answering correctly every time.
+func TestAResponseToAnEarlierRoundStillVerifies(t *testing.T) {
+	fixture := newCheckerFixture(t)
+
+	target := netip.MustParseAddrPort("198.51.100.10:51820")
+	if err := fixture.engine.AddCandidate(candidate("c1", KindHost, target.String(), 100)); err != nil {
+		t.Fatalf("adding: %v", err)
+	}
+
+	if err := fixture.checker.sendChallenge(context.Background(),
+		Candidate{ID: "c1", Address: target}); err != nil {
+		t.Fatalf("sending: %v", err)
+	}
+	first := onlyOutstanding(t, fixture.checker)
+
+	// The next round goes out before the answer to the first got back.
+	if err := fixture.checker.sendChallenge(context.Background(),
+		Candidate{ID: "c1", Address: target}); err != nil {
+		t.Fatalf("resending: %v", err)
+	}
+
+	response := EncodeResponse(first.Nonce, testNow(), target, testKey())
+	if _, verified := fixture.checker.handleArrival(
+		probeArrival{payload: response, source: target}); !verified {
+		t.Error("a reply to the previous round was discarded; re-probing dropped its nonce")
+	}
+}

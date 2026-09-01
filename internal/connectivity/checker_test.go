@@ -94,6 +94,25 @@ func (f *fakeTransport) sentTo(target netip.AddrPort) int {
 	return count
 }
 
+// onlyOutstanding returns the single challenge in flight.
+//
+// Tests care about the challenge, not how the checker indexes it, so they go
+// through this rather than the map's key.
+func onlyOutstanding(t *testing.T, checker *Checker) Challenge {
+	t.Helper()
+
+	checker.mu.Lock()
+	defer checker.mu.Unlock()
+
+	if len(checker.outstanding) != 1 {
+		t.Fatalf("%d challenges outstanding, want 1", len(checker.outstanding))
+	}
+	for _, pending := range checker.outstanding {
+		return pending.challenge
+	}
+	return Challenge{}
+}
+
 // advancingClock moves forward a fixed step per reading.
 //
 // A frozen clock would never let the total timeout expire, so a session with
@@ -376,9 +395,7 @@ func TestAResponseFromTheWrongAddressPromotesNothing(t *testing.T) {
 		t.Fatalf("sending: %v", err)
 	}
 
-	checker.mu.Lock()
-	challenge := checker.outstanding["target"]
-	checker.mu.Unlock()
+	challenge := onlyOutstanding(t, checker)
 
 	// A valid response, correctly signed, arriving from somewhere else.
 	elsewhere := netip.MustParseAddrPort("203.0.113.9:51820")
