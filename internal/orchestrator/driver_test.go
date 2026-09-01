@@ -729,6 +729,128 @@ func TestInitiatorAcceptsAnOfferFromASkewedResponder(t *testing.T) {
 	}
 }
 
+// A listener builds a fresh driver for each attempt, so the record of what it
+// answered must be supplied from outside and survive between them.
+//
+// Without that, a responder binds to the same stored session on every attempt
+// and refuses every live request behind it. Measured against real relays: the
+// responder answered session e29cb989 from an earlier run and then refused six
+// consecutive live requests, one per attempt, indefinitely.
+func TestAnsweredSessionsSurviveAcrossDrivers(t *testing.T) {
+	answered := NewAnsweredSessions(func() time.Time { return testFixedNow })
+
+	stale := requestMessage(t)
+	stale.session = strings.Repeat("88", 32)
+
+	live := requestMessage(t)
+	live.session = strings.Repeat("99", 32)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// First attempt: a driver answers the stored session and then fails, as one
+	// answering an abandoned session does.
+	first := newDriverSharing(t, answered, []scriptedMessage{stale, live})
+	chosen, err := first.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("first attempt: %v", err)
+	}
+	if chosen.sessionID.String() != stale.session {
+		t.Fatalf("first attempt answered %s, expected the stored %s",
+			chosen.sessionID.String()[:8], stale.session[:8])
+	}
+
+	// Second attempt: a new driver, the same record. The relay hands back both
+	// requests again, and the responder must move past the one it answered.
+	second := newDriverSharing(t, answered, []scriptedMessage{stale, live})
+	next, err := second.awaitRequest(ctx)
+	if err != nil {
+		t.Fatalf("second attempt: %v", err)
+	}
+	if next.sessionID.String() != live.session {
+		t.Errorf("second attempt answered %s again; a fresh driver forgot what the listener had answered",
+			next.sessionID.String()[:8])
+	}
+}
+
+// A session is forgotten once a relay would no longer serve its messages, so a
+// listener left up for weeks does not grow without bound.
+func TestAnsweredSessionsAreForgottenEventually(t *testing.T) {
+	now := testFixedNow
+	answered := NewAnsweredSessions(func() time.Time { return now })
+
+	var session domain.SessionID
+	for i := range session {
+		session[i] = byte(i + 1)
+	}
+
+	answered.Add(session)
+	if !answered.Contains(session) {
+		t.Fatal("a session just answered must be remembered")
+	}
+
+	now = now.Add(answeredRetention + time.Minute)
+	if answered.Contains(session) {
+		t.Error("a session older than the retention window must be forgotten")
+	}
+}
+
+// newDriverSharing builds a driver over a shared record of answered sessions.
+//
+// It goes through NewDriver rather than setting the field afterwards, so the
+// test exercises the wiring a listener actually uses: a constructor that ignored
+// the supplied record would still pass if the test reached past it.
+func newDriverSharing(t *testing.T, answered *AnsweredSessions, script []scriptedMessage) *Driver {
+	t.Helper()
+
+	controller := wireguard.NewFakeController()
+	clock := &fixedClock{now: testFixedNow}
+	journal := netstate.NewJournalStore(t.TempDir())
+	netManager := netstate.NewManager(controller, journal, clock)
+
+	manager, err := NewSessionManager(SessionManagerOptions{
+		Controller: controller, NetState: netManager, Clock: clock,
+	})
+	if err != nil {
+		t.Fatalf("building manager: %v", err)
+	}
+
+	peer := nostrIdentity(t, 9)
+	allowlist := policy.NewAllowlist()
+	if err := allowlist.Add(policy.Grant{
+		Peer: peer, Alias: "peer", Actions: []policy.Action{policy.ActionSession},
+	}); err != nil {
+		t.Fatalf("authorizing: %v", err)
+	}
+
+	driver, err := NewDriver(DriverDeps{
+		Manager:    manager,
+		Allowlist:  allowlist,
+		NetState:   netManager,
+		Controller: controller,
+		Identity:   nostrIdentity(t, 1),
+		Keys:       identity.NewKeyGenerator(),
+		Transport:  newStubTransport(51820),
+		Publisher:  &stubPublisher{},
+		Receiver:   &stubReceiver{messages: script},
+		Gatherer: connectivity.NewGatherer(connectivity.GathererOptions{
+			Policy: connectivity.GatherPolicy{Order: []connectivity.Method{connectivity.MethodInterface}},
+			Clock:  clock.Now,
+		}),
+		Clock:    clock,
+		Answered: answered,
+	}, DriverOptions{
+		InterfaceName:    "nm0",
+		AllowedIPs:       []netip.Prefix{netip.MustParsePrefix("100.96.0.2/32")},
+		HandshakeTimeout: 300 * time.Millisecond,
+		VerifyTimeout:    300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("building driver: %v", err)
+	}
+	return driver
+}
+
 // requestMessage scripts a session request from the peer.
 func requestMessage(t *testing.T) scriptedMessage {
 	t.Helper()

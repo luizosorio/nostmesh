@@ -113,14 +113,90 @@ type Driver struct {
 	receiver  Receiver
 	gatherer  *connectivity.Gatherer
 
-	// pending holds messages that arrived before the step consuming them, and
-	// tried records the sessions this responder has already answered.
+	// pending holds messages that arrived before the step consuming them.
 	pendingMu sync.Mutex
 	pending   map[protocol.MessageType][]Delivery
-	tried     map[domain.SessionID]bool
+
+	// answered records the sessions already answered. It is supplied by the
+	// caller rather than owned here, because a listener builds a fresh driver
+	// per attempt: state kept here would be forgotten between them, and the
+	// responder would answer the same dead session on every one.
+	answered *AnsweredSessions
 
 	options DriverOptions
 }
+
+// AnsweredSessions remembers the sessions a responder has answered.
+//
+// It outlives any one attempt. A listener runs for as long as the operator
+// leaves it up and builds a fresh driver each time it answers, so this is what
+// keeps a relay's replayed backlog from being answered over and over: without
+// it the responder binds to the same dead session on every attempt and refuses
+// every live request behind it.
+//
+// Asking is separate from recording, and the separation matters. A session that
+// was answered must not be answered again, but one merely considered and passed
+// over must stay available — marking on inspection would strike off a session
+// the peer is still able to retry.
+type AnsweredSessions struct {
+	mu   sync.Mutex
+	seen map[domain.SessionID]time.Time
+	now  func() time.Time
+}
+
+// NewAnsweredSessions builds an empty record.
+func NewAnsweredSessions(now func() time.Time) *AnsweredSessions {
+	if now == nil {
+		now = time.Now
+	}
+	return &AnsweredSessions{seen: make(map[domain.SessionID]time.Time), now: now}
+}
+
+// Contains reports whether a session has been answered.
+func (a *AnsweredSessions) Contains(sessionID domain.SessionID) bool {
+	if a == nil {
+		return false
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.evict()
+	_, seen := a.seen[sessionID]
+	return seen
+}
+
+// Add records that a session has been answered.
+func (a *AnsweredSessions) Add(sessionID domain.SessionID) {
+	if a == nil {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.evict()
+	a.seen[sessionID] = a.now()
+}
+
+// evict forgets sessions old enough that a relay will no longer replay them.
+//
+// Forgetting is safe because the messages of such a session have expired: a
+// replay of one fails validation before it reaches this check. Remembering them
+// forever would grow without bound on a listener left up for weeks.
+func (a *AnsweredSessions) evict() {
+	cutoff := a.now().Add(-answeredRetention)
+	for sessionID, at := range a.seen {
+		if at.Before(cutoff) {
+			delete(a.seen, sessionID)
+		}
+	}
+}
+
+// answeredRetention is how long an answered session is remembered. It comfortably
+// outlasts the window in which a relay would still serve that session's stored
+// messages.
+const answeredRetention = time.Hour
 
 // keyGenerator produces this session's ephemeral WireGuard key pair.
 type keyGenerator interface {
@@ -189,6 +265,11 @@ type DriverDeps struct {
 	Receiver   Receiver
 	Gatherer   *connectivity.Gatherer
 	Clock      domain.Clock
+
+	// Answered records sessions this node has already responded to. A caller
+	// that builds a driver per attempt must supply the same record each time,
+	// or the responder forgets what it answered and repeats itself.
+	Answered *AnsweredSessions
 }
 
 // NewDriver builds a Driver.
@@ -221,6 +302,11 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 	if deps.Clock == nil {
 		deps.Clock = domain.SystemClock{}
 	}
+	if deps.Answered == nil {
+		// A driver used for a single attempt needs no shared record; one built
+		// per attempt by a listener does, and supplies it.
+		deps.Answered = NewAnsweredSessions(deps.Clock.Now)
+	}
 	opts.applyDefaults()
 
 	return &Driver{
@@ -235,6 +321,7 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 		publisher:  deps.Publisher,
 		receiver:   deps.Receiver,
 		gatherer:   deps.Gatherer,
+		answered:   deps.Answered,
 		options:    opts,
 	}, nil
 }
@@ -680,32 +767,13 @@ func (d *Driver) settle(request *pendingRequest) (*pendingRequest, error) {
 }
 
 // alreadyTried reports whether this responder has already answered a session.
-//
-// Asking is separate from recording, and the separation is the point. A relay
-// hands stored requests back on every poll, so a session that was answered must
-// not be answered again — but one that was merely considered and passed over
-// must stay available. Marking on selection loses exactly the case that matters:
-// the responder picks a stale request, the attempt fails, and the session it
-// should have answered has been struck off by the act of looking at it.
 func (d *Driver) alreadyTried(sessionID domain.SessionID) bool {
-	d.pendingMu.Lock()
-	defer d.pendingMu.Unlock()
-
-	return d.tried[sessionID]
+	return d.answered.Contains(sessionID)
 }
 
 // recordAttempt marks a session as answered.
-//
-// Called once the responder commits to a request, not while it is still
-// choosing among them.
 func (d *Driver) recordAttempt(sessionID domain.SessionID) {
-	d.pendingMu.Lock()
-	defer d.pendingMu.Unlock()
-
-	if d.tried == nil {
-		d.tried = make(map[domain.SessionID]bool)
-	}
-	d.tried[sessionID] = true
+	d.answered.Add(sessionID)
 }
 
 // readRequest waits for one request and reports the session it named.

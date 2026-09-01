@@ -159,6 +159,13 @@ func runListener(cfg config.Config, peer domain.NostrPublicKey,
 		cancel()
 	}()
 
+	// Answered sessions are remembered across attempts, not within one. Each
+	// attempt gets a fresh runtime, so a record owned by the driver would be
+	// forgotten between them and the responder would answer the same dead
+	// session from the relay's backlog every time — refusing every live request
+	// behind it.
+	answered := orchestrator.NewAnsweredSessions(time.Now)
+
 	stdout.printf("listening for %s; press Ctrl-C to stop\n", peer.Short())
 
 	for attempt := 1; ; attempt++ {
@@ -167,7 +174,7 @@ func runListener(cfg config.Config, peer domain.NostrPublicKey,
 			return exitOK
 		}
 
-		err := answerOnce(ctx, cfg, peer, timeout, stdout)
+		err := answerOnce(ctx, cfg, peer, timeout, stdout, answered)
 		switch {
 		case ctx.Err() != nil:
 			stdout.printf("stopped\n")
@@ -196,7 +203,7 @@ func runListener(cfg config.Config, peer domain.NostrPublicKey,
 
 // answerOnce builds a runtime, answers one session, and releases everything.
 func answerOnce(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration, stdout *output,
+	timeout time.Duration, stdout *output, answered *orchestrator.AnsweredSessions,
 ) error {
 	sessionCtx := ctx
 	if timeout > 0 {
@@ -207,7 +214,7 @@ func answerOnce(ctx context.Context, cfg config.Config, peer domain.NostrPublicK
 
 	trace := func(line string) { stdout.printf("  %s\n", line) }
 
-	runtime, err := buildSessionRuntime(sessionCtx, cfg, peer, timeout, trace)
+	runtime, err := buildSessionRuntime(sessionCtx, cfg, peer, timeout, trace, answered)
 	if err != nil {
 		return err
 	}
@@ -258,7 +265,7 @@ func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator
 	// ends empty — so saying what did arrive is most of the diagnosis.
 	trace := func(line string) { stdout.printf("  %s\n", line) }
 
-	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, trace)
+	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, trace, nil)
 	if err != nil {
 		stderr.printf("nostmesh: %v\n", err)
 		return exitError

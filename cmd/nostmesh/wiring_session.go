@@ -36,7 +36,7 @@ type sessionRuntime struct {
 // configuration file, which is the local operator's statement of what this node
 // will accept — never from anything a peer sends.
 func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration, trace func(string),
+	timeout time.Duration, trace func(string), answered *orchestrator.AnsweredSessions,
 ) (*sessionRuntime, error) {
 	adapter, closeAdapter, err := wireguard.NewController()
 	if err != nil {
@@ -162,6 +162,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Receiver:   plane,
 		Gatherer:   gatherer,
 		Clock:      clock,
+		Answered:   answered,
 	}, options)
 	if err != nil {
 		return fail(err)
