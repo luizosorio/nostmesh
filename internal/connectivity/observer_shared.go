@@ -93,16 +93,22 @@ func (o *SharedObserver) awaitResponse(ctx context.Context, request *stun.Messag
 		case <-waitCtx.Done():
 			return netip.AddrPort{}, fmt.Errorf("%w: %s: %w", ErrObserverUnreachable, server, waitCtx.Err())
 
-		case datagram := <-o.transport.stun:
-			observed, err := parseSTUNResponse(datagram.payload, request.TransactionID, server)
-			if err != nil {
-				// A response that does not match this query is discarded and
-				// the wait continues: refusing outright would let anything that
-				// can reach this socket cancel a legitimate observation.
-				continue
-			}
-			return observed, nil
+		default:
 		}
+
+		payload, _, err := o.transport.ReceiveSTUN(waitCtx)
+		if err != nil {
+			return netip.AddrPort{}, fmt.Errorf("%w: %s: %w", ErrObserverUnreachable, server, err)
+		}
+
+		observed, parseErr := parseSTUNResponse(payload, request.TransactionID, server)
+		if parseErr != nil {
+			// A response that does not match this query is discarded and the
+			// wait continues: refusing outright would let anything that can
+			// reach this socket cancel a legitimate observation.
+			continue
+		}
+		return observed, nil
 	}
 }
 
