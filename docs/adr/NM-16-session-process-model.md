@@ -1,6 +1,6 @@
 # NM-16 — Session process model
 
-**Status:** Accepted
+**Status:** Superseded by [NM-18](NM-18-service-process-model.md)
 **Date:** 2026-08-31
 **Milestone:** M1.5 (completing)
 

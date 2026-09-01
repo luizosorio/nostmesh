@@ -41,7 +41,6 @@ func commands() []command {
 		{"serve", "Hold sessions with every authorized peer", runServe},
 		{"state", "Report what a running service is doing", runState},
 		{"connect", "Negotiate a session with a peer", runConnect},
-		{"listen", "Wait for a peer to open a session", runListen},
 		{"sessions", "List authorized peers and active sessions", runSessions},
 		{"disconnect", "Close a session", runDisconnect},
 		{"relay-check", "Check real relays accept this protocol", runRelayCheck},
