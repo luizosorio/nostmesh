@@ -1200,10 +1200,45 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 				ErrSessionDropped, peerTunnel.Short(), age.Truncate(time.Second))
 		}
 
+		// Checked after staleness, never before: a session already dead is torn
+		// down rather than followed, since writing kernel state for a tunnel
+		// about to be removed helps nobody.
+		d.followRoam(ctx, peer, observed)
+
 		if onPoll != nil {
 			onPoll(observed)
 		}
 	}
+}
+
+// followRoam records an endpoint the kernel moved to on its own.
+//
+// A peer that changed address is the same peer, and the tunnel is already
+// carrying on the new one: WireGuard moved it after authenticating a packet
+// under the session's tunnel keys. What is left is to agree with the kernel, so
+// the recorded endpoint does not go stale and a later reconciliation does not
+// push an address the peer has left back into the kernel. See NM-20.
+//
+// Failure is reported and survived. The tunnel works either way, so ending the
+// hold over a bookkeeping problem would turn a successful roam into a teardown —
+// which is the behaviour this exists to replace.
+func (d *Driver) followRoam(ctx context.Context, peer domain.NostrPublicKey, observed wireguard.PeerState) {
+	if observed.Endpoint == nil {
+		return
+	}
+
+	state, known := d.manager.Get(peer)
+	if !known || state.Endpoint == nil || *state.Endpoint == *observed.Endpoint {
+		return
+	}
+
+	// The error is deliberately dropped. Rejection by hysteresis is the ordinary
+	// case — the bound exists so a flapping path is not followed every poll —
+	// and a genuine failure is visible where an operator already looks: the
+	// recorded endpoint stays behind the kernel's, and the next poll retries.
+	// The driver has no logger of its own, and giving it one to report a
+	// condition that resolves itself would be the wrong trade.
+	_ = d.manager.RecordObservedEndpoint(ctx, peer, *observed.Endpoint, d.options.InterfaceName)
 }
 
 // SessionID returns the conversation id for a peer's session, if there is one.

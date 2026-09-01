@@ -46,3 +46,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-17](NM-17-probe-binding-and-peer-reflexive.md) | Probe binding and peer-reflexive candidates | Accepted |
 | [NM-18](NM-18-service-process-model.md) | Service process model | Accepted |
 | [NM-19](NM-19-identity-import.md) | Adopting an existing Nostr identity | Accepted |
+| [NM-20](NM-20-kernel-observed-roaming.md) | Following a roamed endpoint | Accepted |

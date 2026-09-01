@@ -53,6 +53,15 @@ func newHoldFixture(t *testing.T) *holdFixture {
 	if err := driver.manager.BindTunnelKey(peer, tunnel); err != nil {
 		t.Fatalf("binding key: %v", err)
 	}
+	// An established session always has these: the driver records the nominated
+	// endpoint and the policy's prefixes before it configures anything. A
+	// fixture without them would be a session shape production never produces.
+	if err := driver.manager.SetAllowedIPs(peer, []netip.Prefix{netip.MustParsePrefix("100.96.0.2/32")}); err != nil {
+		t.Fatalf("setting allowed ips: %v", err)
+	}
+	if err := driver.manager.RecordEndpoint(peer, verifiedCandidate("198.51.100.10:51820")); err != nil {
+		t.Fatalf("recording endpoint: %v", err)
+	}
 	if err := driver.manager.AdvancePhase(peer, PhaseEstablished); err != nil {
 		t.Fatalf("advancing: %v", err)
 	}
@@ -329,5 +338,116 @@ func TestReleaseRunsEvenWhenTheContextIsCancelled(t *testing.T) {
 	}
 	if _, err := fixture.controller.ObserveInterface(context.Background(), "nm0"); !errors.Is(err, wireguard.ErrInterfaceNotFound) {
 		t.Error("cancellation left the interface holding the port")
+	}
+}
+
+// A hold follows an endpoint the kernel moved to.
+//
+// This is the defect the roaming work exists to fix: Roam was implemented,
+// transactional and tested, and nothing ever called it. An endpoint that changed
+// surfaced as a stale handshake, the session was torn down, and the worker
+// renegotiated from nothing — discarding a session id, a key pair and an
+// authorization to learn a route.
+func TestAHeldSessionFollowsAMovedEndpoint(t *testing.T) {
+	fixture := newHoldFixture(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := fixture.hold(ctx)
+
+	moved := netip.MustParseAddrPort("203.0.113.88:51820")
+	if err := fixture.controller.MoveEndpoint("nm0", fixture.tunnel, moved); err != nil {
+		t.Fatalf("moving the endpoint: %v", err)
+	}
+
+	// The hold keeps the session alive while it follows.
+	deadline := time.After(2 * time.Second)
+	for {
+		state, known := fixture.driver.manager.Get(fixture.peer)
+		if known && state.Endpoint != nil && *state.Endpoint == moved {
+			break
+		}
+
+		select {
+		case err := <-done:
+			t.Fatalf("the hold ended instead of following the move: %v", err)
+		case <-deadline:
+			t.Fatal("the endpoint moved and the session did not follow it")
+		default:
+		}
+
+		fixture.clock.advance(time.Second)
+		_ = fixture.controller.AdvanceHandshake("nm0", fixture.tunnel, fixture.clock.Now())
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+}
+
+// A move that cannot be recorded does not end the session.
+//
+// The tunnel is already carrying on the new address — the kernel moved it after
+// authenticating a packet. Failing to write down our agreement with that is a
+// bookkeeping problem, and ending the hold over it would turn a successful roam
+// into a teardown.
+func TestAFailedFollowDoesNotEndTheSession(t *testing.T) {
+	fixture := newHoldFixture(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := fixture.hold(ctx)
+
+	fixture.controller.FailOn["ApplyPeer"] = errors.New("netlink refused the write")
+	if err := fixture.controller.MoveEndpoint("nm0", fixture.tunnel,
+		netip.MustParseAddrPort("203.0.113.99:51820")); err != nil {
+		t.Fatalf("moving the endpoint: %v", err)
+	}
+
+	for range 5 {
+		fixture.clock.advance(time.Second)
+		_ = fixture.controller.AdvanceHandshake("nm0", fixture.tunnel, fixture.clock.Now())
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("a bookkeeping failure ended a carrying session: %v", err)
+	default:
+	}
+
+	cancel()
+	<-done
+}
+
+// Roaming must not become a way for a dead session to look alive.
+//
+// Following an endpoint runs after the staleness check, never before, so a
+// session whose handshake stopped refreshing is torn down rather than followed.
+func TestAMovedEndpointDoesNotMaskAStaleHandshake(t *testing.T) {
+	fixture := newHoldFixture(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := fixture.hold(ctx)
+
+	if err := fixture.controller.MoveEndpoint("nm0", fixture.tunnel,
+		netip.MustParseAddrPort("203.0.113.55:51820")); err != nil {
+		t.Fatalf("moving the endpoint: %v", err)
+	}
+
+	// The endpoint moved, but nothing refreshes the handshake.
+	fixture.clock.advance(2 * time.Minute)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSessionDropped) {
+			t.Errorf("expected ErrSessionDropped, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("a session with a stale handshake was held because its endpoint moved")
 	}
 }
