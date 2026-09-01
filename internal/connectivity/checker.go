@@ -258,20 +258,12 @@ func (c *Checker) verifyResponse(payload []byte, source netip.AddrPort) (time.Du
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for id, challenge := range c.outstanding {
-		address, known := c.candidateAddress(id)
-		if !known {
-			continue
-		}
+	response, err := DecodeResponse(payload, c.key)
+	if err != nil {
+		return 0, false
+	}
 
-		// The tag must cover the address this node probed. A response captured
-		// while verifying one candidate therefore cannot promote another, which
-		// is the property that used to live — and did not work — in the
-		// challenge.
-		response, err := DecodeResponse(payload, address, c.key)
-		if err != nil {
-			continue
-		}
+	for id, challenge := range c.outstanding {
 		if err := VerifyResponse(challenge, response); err != nil {
 			continue
 		}

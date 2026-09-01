@@ -22,8 +22,17 @@ const (
 	// TagSize is the authentication tag length.
 	TagSize = 32
 
-	// ProbeSize is the total wire size of a challenge or response.
-	ProbeSize = 1 + NonceSize + 8 + TagSize
+	// ObservedSize is the address a response states, as 16 bytes plus a port.
+	ObservedSize = 16 + 2
+
+	// ProbeSize is the wire size of both a challenge and a response.
+	//
+	// A response has to state the address it observed, which a challenge has no
+	// use for. Rather than let the response be the larger of the two, the
+	// challenge is padded to the same size: a probe that answers with more
+	// bytes than it received is a reflector, and the amplification would be
+	// available to anyone who can spoof a source address.
+	ProbeSize = 1 + NonceSize + 8 + ObservedSize + TagSize
 )
 
 // Message types on the probe wire.
@@ -129,28 +138,42 @@ func EncodeChallenge(challenge Challenge, key SessionKey) []byte {
 	buf = append(buf, challenge.Nonce[:]...)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(challenge.SentAt.UnixNano()))
 
+	// Padding where a response states its observed address, so the two are the
+	// same size and answering cannot amplify.
+	buf = append(buf, make([]byte, ObservedSize)...)
+
 	tag := authenticateUnbound(key, probeChallenge, challenge.Nonce[:], buf[NonceSize+1:])
 	return append(buf, tag...)
 }
 
 // EncodeResponse serializes a response to a challenge.
 //
-// The response carries the same nonce and is authenticated with the address the
-// responder observed the challenge arriving from. That address is the one value
-// both ends share: it is what the challenger sees as its own mapped address for
-// this path, and what the responder sees as the source.
+// The response carries the same nonce and states the address the responder saw
+// the challenge arrive from — the challenger's own mapped address for this path,
+// which the challenger cannot learn any other way. The tag covers that address,
+// so a peer cannot claim to have been reached somewhere it was not.
 //
-// This is where the anti-relay property lives. A response is only valid for the
-// path it was made on, so one captured while verifying candidate X cannot be
-// replayed to promote candidate Y. Promotion is what an attacker would want to
-// influence, and promotion depends on this tag.
-func EncodeResponse(nonce [NonceSize]byte, receivedAt time.Time, source netip.AddrPort, key SessionKey) []byte {
+// The address is on the wire rather than assumed, because the two ends do not
+// share one. The challenger knows where it aimed; the responder knows where the
+// datagram came from; behind NAT those are different values, and a tag over
+// either one alone cannot be recomputed by the other side.
+//
+// Path binding is preserved by the caller, which additionally requires the
+// datagram to arrive from the address it probed. The tag proves what the
+// responder claimed; that check proves where it actually came from.
+func EncodeResponse(nonce [NonceSize]byte, receivedAt time.Time, observed netip.AddrPort, key SessionKey) []byte {
+	address := observed.Addr().Unmap().As16()
+	port := make([]byte, 2)
+	binary.BigEndian.PutUint16(port, observed.Port())
+
 	buf := make([]byte, 0, ProbeSize)
 	buf = append(buf, probeResponse)
 	buf = append(buf, nonce[:]...)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(receivedAt.UnixNano()))
+	buf = append(buf, address[:]...)
+	buf = append(buf, port...)
 
-	tag := authenticate(key, probeResponse, nonce[:], buf[NonceSize+1:], source)
+	tag := authenticateUnbound(key, probeResponse, nonce[:], buf[NonceSize+1:])
 	return append(buf, tag...)
 }
 
@@ -164,6 +187,11 @@ type DecodedProbe struct {
 
 	// Timestamp is when the sender produced it.
 	Timestamp time.Time
+
+	// Observed is the address a response states it saw the challenge come from.
+	// It is this node's own mapped address for that path — the only way to
+	// learn it without trusting a third party — and it is authenticated.
+	Observed netip.AddrPort
 }
 
 // DecodeProbe parses and authenticates a probe.
@@ -191,11 +219,15 @@ func DecodeChallenge(raw []byte, key SessionKey) (DecodedProbe, error) {
 
 // DecodeResponse parses and authenticates a response to a challenge.
 //
-// The caller supplies the address it probed, which is what the tag must cover.
-// A response is only usable for the candidate it was sent to: one captured
-// while verifying a different path will not authenticate here, and that is what
-// keeps a promotion tied to the path it was earned on.
-func DecodeResponse(raw []byte, probed netip.AddrPort, key SessionKey) (DecodedProbe, error) {
+// What the response states is the address the responder saw the challenge come
+// from — this node's own mapped address for that path, which it cannot learn
+// any other way and which the tag makes unforgeable.
+//
+// It does not take the address probed, because the two ends do not share one.
+// Binding a promotion to its path is the caller's job: it confirms the datagram
+// arrived from the address it probed, which no attacker off that path can
+// arrange.
+func DecodeResponse(raw []byte, key SessionKey) (DecodedProbe, error) {
 	parsed, err := parseProbe(raw)
 	if err != nil {
 		return DecodedProbe{}, err
@@ -204,10 +236,11 @@ func DecodeResponse(raw []byte, probed netip.AddrPort, key SessionKey) (DecodedP
 		return DecodedProbe{}, fmt.Errorf("%w: probe is a challenge, not a response", ErrProbeMismatch)
 	}
 
-	expected := authenticate(key, parsed.kind, parsed.nonce[:], parsed.body, probed)
+	expected := authenticateUnbound(key, parsed.kind, parsed.nonce[:], parsed.body)
 	if subtle.ConstantTimeCompare(parsed.tag, expected) != 1 {
 		return DecodedProbe{}, ErrProbeUnauthenticated
 	}
+
 	return parsed.decoded(), nil
 }
 
@@ -234,12 +267,19 @@ type parsedProbe struct {
 
 // decoded builds the caller-facing form. Only call it after the tag verifies.
 func (p parsedProbe) decoded() DecodedProbe {
-	nanos := binary.BigEndian.Uint64(p.body)
+	nanos := binary.BigEndian.Uint64(p.body[:8])
+
+	var raw [16]byte
+	copy(raw[:], p.body[8:8+16])
+	address, _ := netip.AddrFromSlice(raw[:])
+	port := binary.BigEndian.Uint16(p.body[8+16:])
+
 	return DecodedProbe{
 		IsResponse: p.kind == probeResponse,
 		Nonce:      p.nonce,
 		//nolint:gosec // the timestamp is authenticated by the caller, so its range is not attacker-controlled
 		Timestamp: time.Unix(0, int64(nanos)),
+		Observed:  netip.AddrPortFrom(address.Unmap(), port),
 	}
 }
 
@@ -257,11 +297,16 @@ func parseProbe(raw []byte) (parsedProbe, error) {
 	var nonce [NonceSize]byte
 	copy(nonce[:], raw[1:1+NonceSize])
 
+	// The body covers the timestamp and the observed address, both of which the
+	// tag authenticates.
+	const bodyStart = 1 + NonceSize
+	bodyEnd := bodyStart + 8 + ObservedSize
+
 	return parsedProbe{
 		kind:  kind,
 		nonce: nonce,
-		body:  raw[1+NonceSize : 1+NonceSize+8],
-		tag:   raw[1+NonceSize+8:],
+		body:  raw[bodyStart:bodyEnd],
+		tag:   raw[bodyEnd:],
 	}, nil
 }
 
