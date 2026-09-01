@@ -122,7 +122,7 @@ type Driver struct {
 	pending   map[protocol.MessageType][]Delivery
 
 	// answered records the sessions already answered. It is supplied by the
-	// caller rather than owned here, because a listener builds a fresh driver
+	// caller rather than owned here, because a peer worker builds a fresh driver
 	// per attempt: state kept here would be forgotten between them, and the
 	// responder would answer the same dead session on every one.
 	answered *AnsweredSessions
@@ -187,7 +187,7 @@ func (a *AnsweredSessions) Add(sessionID domain.SessionID) {
 //
 // Forgetting is safe because the messages of such a session have expired: a
 // replay of one fails validation before it reaches this check. Remembering them
-// forever would grow without bound on a listener left up for weeks.
+// forever would grow without bound on a service left up for weeks.
 func (a *AnsweredSessions) evict() {
 	cutoff := a.now().Add(-answeredRetention)
 	for sessionID, at := range a.seen {
@@ -225,10 +225,13 @@ type DriverOptions struct {
 
 	// HandshakeTimeout bounds the control-plane negotiation.
 	//
-	// Negative means unbounded: a listener may legitimately wait days for a peer
-	// to be ready, and the only thing that should end that wait is the caller
-	// cancelling its context. Zero takes the default, so an unset field still
-	// gets a sensible bound.
+	// Negative means unbounded: a caller may legitimately wait for a peer that
+	// is hours from being ready, and the only thing that should end that wait is
+	// its own context being cancelled. Zero takes the default, so an unset field
+	// still gets a sensible bound.
+	//
+	// The service does not use it unbounded — it bounds one attempt's
+	// negotiation so a silent peer cannot hold an attempt open forever.
 	HandshakeTimeout time.Duration
 
 	// VerifyTimeout bounds how long to wait for the first data-plane handshake.
@@ -340,7 +343,7 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 	}
 	if deps.Answered == nil {
 		// A driver used for a single attempt needs no shared record; one built
-		// per attempt by a listener does, and supplies it.
+		// per attempt by a peer worker does, and supplies it.
 		deps.Answered = NewAnsweredSessions(deps.Clock.Now)
 	}
 	opts.applyDefaults()
@@ -818,10 +821,10 @@ func (d *Driver) awaitRequest(ctx context.Context) (*pendingRequest, error) {
 	//
 	// A responder answers the first request it has not already answered.
 	//
-	// It can be that simple because a listener runs continuously: it is already
+	// It can be that simple because the service runs continuously: it is already
 	// subscribed when a request is published, so requests arrive in order and
 	// the one in front is the current one. What made this hard before was a
-	// listener that started, found several stored requests at once, and had to
+	// responder that started, found several stored requests at once, and had to
 	// guess which was live — a guess no timestamp can settle, because the gap
 	// between a stale request and a fresh one is far smaller than the clock skew
 	// two healthy hosts may have.

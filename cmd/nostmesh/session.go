@@ -71,33 +71,6 @@ func runConnect(args []string, stdout, stderr *output) int {
 	return runSession(cfg, peer, orchestrator.RoleAuto, *timeout, stdout, stderr)
 }
 
-// retryDelay spaces out attempts, growing while they keep failing.
-//
-// A peer that is simply not ready yet costs one short pause; a condition that
-// cannot resolve — a port held by another process, a configuration the operator
-// must fix — backs off to a rate that keeps the failure visible in the log
-// without drowning it.
-func retryDelay(consecutive int) time.Duration {
-	if consecutive <= 0 {
-		return listenRetryInterval
-	}
-
-	delay := listenRetryInterval << min(consecutive-1, maxRetryDoublings)
-	return min(delay, maxListenRetryInterval)
-}
-
-const (
-	// listenRetryInterval separates one attempt from the next.
-	listenRetryInterval = 2 * time.Second
-
-	// maxListenRetryInterval caps the backoff, so a listener still notices a
-	// peer that becomes ready after a long outage.
-	maxListenRetryInterval = 30 * time.Second
-
-	// maxRetryDoublings bounds the shift, so the delay cannot overflow.
-	maxRetryDoublings = 8
-)
-
 // runSession builds the runtime and drives one session to a carrying tunnel.
 //
 // Interrupting it tears down cleanly rather than leaving a half-configured

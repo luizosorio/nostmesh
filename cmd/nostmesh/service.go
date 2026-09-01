@@ -576,6 +576,33 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	}
 }
 
+// retryDelay spaces out a worker's attempts, growing while they keep failing.
+//
+// A peer that is simply not ready yet costs one short pause; a condition that
+// cannot resolve — a port held by another process, a configuration the operator
+// must fix — backs off to a rate that keeps the failure visible in the log
+// without drowning it.
+func retryDelay(consecutive int) time.Duration {
+	if consecutive <= 0 {
+		return retryInterval
+	}
+
+	delay := retryInterval << min(consecutive-1, maxRetryDoublings)
+	return min(delay, maxRetryInterval)
+}
+
+const (
+	// retryInterval separates one attempt from the next.
+	retryInterval = 2 * time.Second
+
+	// maxRetryInterval caps the backoff, so a worker still notices a peer that
+	// becomes ready after a long outage.
+	maxRetryInterval = 30 * time.Second
+
+	// maxRetryDoublings bounds the shift, so the delay cannot overflow.
+	maxRetryDoublings = 8
+)
+
 // negotiationBound is how long one attempt's negotiation may take.
 //
 // The worker itself runs for as long as the operator leaves it running, but a
