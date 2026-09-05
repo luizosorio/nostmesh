@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestZZDiagRoam(t *testing.T) {
@@ -14,18 +15,30 @@ func TestZZDiagRoam(t *testing.T) {
 		t.Fatalf("moving: %v", err)
 	}
 
+	start := time.Now()
 	obs, err := fixture.driver.observePeer(context.Background(), fixture.tunnel)
-	t.Logf("observePeer: err=%v endpoint=%v handshake=%v", err, obs.Endpoint, obs.HasHandshake())
+	t.Logf("observePeer took %s: err=%v endpoint=%v", time.Since(start), err, obs.Endpoint)
 
-	st, known := fixture.driver.manager.Get(fixture.peer)
-	t.Logf("state: known=%v phase=%v endpoint=%v allowed=%v tunnelKey=%v",
-		known, st.Phase, st.Endpoint, st.AllowedIPs, st.TunnelPublicKey != nil)
-
-	t.Logf("netstate nil? %v", fixture.driver.manager.netstate == nil)
-
-	iface, ierr := fixture.controller.ObserveInterface(context.Background(), "nm0")
-	t.Logf("iface: err=%v ownedByUs=%v addrs=%v", ierr, iface.OwnedByUs, iface.Addresses)
-
+	start = time.Now()
 	rerr := fixture.driver.manager.RecordObservedEndpoint(context.Background(), fixture.peer, moved, "nm0")
-	t.Logf("RecordObservedEndpoint: err=%v", rerr)
+	t.Logf("RecordObservedEndpoint took %s: err=%v", time.Since(start), rerr)
+}
+
+// How long a single journalled apply costs here.
+func TestZZDiagApplyCost(t *testing.T) {
+	fixture := newHoldFixture(t)
+
+	for i := range 3 {
+		addr := netip.MustParseAddrPort("203.0.113.88:51820")
+		if i == 1 {
+			addr = netip.MustParseAddrPort("203.0.113.89:51820")
+		}
+		if i == 2 {
+			addr = netip.MustParseAddrPort("203.0.113.90:51820")
+		}
+		fixture.clock.advance(time.Minute)
+		start := time.Now()
+		err := fixture.driver.manager.RecordObservedEndpoint(context.Background(), fixture.peer, addr, "nm0")
+		t.Logf("apply %d took %s err=%v", i, time.Since(start), err)
+	}
 }
