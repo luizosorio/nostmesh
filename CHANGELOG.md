@@ -7,12 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.0.3] — 2026-09-01
+## [0.2.3] — 2026-09-05
 
 **A peer that changes address keeps its session.**
 
-The version is a patch by the maintainer's decision, keeping the 2.0.x series.
-Note that unlike 2.0.2 this one **does change behaviour**: an endpoint that moves
+Note that unlike 0.2.2 this one **does change behaviour**: an endpoint that moves
 is now followed instead of ending the session.
 
 ### Added
@@ -63,15 +62,18 @@ is now followed instead of ending the session.
 - **No relay fallback**, **no forward secrecy** in the signalling, and a
   development keystore holding the private key unencrypted — all unchanged.
 
-## [2.0.2] — 2026-09-01
+## [0.2.2] — 2026-09-01
 
 **Housekeeping. No behaviour changes.**
 
-The binary does what 2.0.1 did. This removes code that no longer had a caller and
+> **Renumbered 2026-09-05.** Published as 2.0.2 and retagged to 0.2.2, together
+> with its predecessor. See the note under 0.2.1.
+
+The binary does what 0.2.1 did. This removes code that no longer had a caller and
 comments that described a command which no longer exists — both of which cost a
 reader time and neither of which the running program noticed.
 
-Upgrading is optional and carries no risk; there is nothing here a 2.0.1
+Upgrading is optional and carries no risk; there is nothing here a 0.2.1
 deployment is missing.
 
 ### Removed
@@ -101,7 +103,7 @@ Net: 1,083 lines removed, 94 added.
 ### Changed
 
 - Comments in `internal/orchestrator` and `cmd/nostmesh` now describe the service
-  and its peer workers rather than `listen`, which 2.0.1 removed.
+  and its peer workers rather than `listen`, which 0.2.1 removed.
 - `listenRetryInterval` and `maxListenRetryInterval` are now `retryInterval` and
   `maxRetryInterval`, moved beside their only caller. Same values, same backoff.
 
@@ -115,13 +117,14 @@ implemented and tested, with no caller yet. Roaming is an MVP 1 acceptance
 criterion, so removing a tested implementation of it would be the wrong kind of
 tidiness; wiring it into the service is a change with its own ADR.
 
-## [2.0.1] — 2026-09-01
+## [0.2.1] — 2026-09-01
 
 **Two hosts, one behind NAT, hold a tunnel.**
 
-The version jumps from 0.2.0 by the maintainer's decision. It is not what the
-Semantic Versioning note above would produce on its own, and it is recorded here
-so the gap is deliberate rather than an accident to be reconciled later.
+> **Renumbered 2026-09-05.** This was published as 2.0.1 and retagged to 0.2.1.
+> The original number jumped the project from 0.x to a stable major it had not
+> reached, contradicting the Semantic Versioning note above. The tag and release
+> were recreated on the same commit; the old ones no longer resolve.
 
 ### Added
 
@@ -211,7 +214,7 @@ coordinator, and no keys exchanged by hand.
 > under adverse relay behaviour and does not prove NAT traversal. Between two
 > real hosts, one behind NAT, this release established no tunnel. The relay
 > measurements are unaffected — those were made against the real public relays
-> named. Fixed in 2.0.1. The published release notes carry the same correction.
+> named. Fixed in 0.2.1. The published release notes carry the same correction.
 
 ### Proven, not assumed
 

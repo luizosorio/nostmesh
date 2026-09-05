@@ -208,7 +208,7 @@ How the identity works, and how to use a Nostr identity you already have, is in
 | Stage | Delivers |
 |---|---|
 | **MVP 0** ✅ | Foundation and manual WireGuard tunnel between two Linux hosts |
-| MVP 1 | Nostr control plane, NAT traversal, direct connection |
+| **MVP 1** ✅ | Nostr control plane, NAT traversal, direct connection |
 | MVP 2 | Mesh, local policy, private route announcements |
 | MVP 3 | Data relay fallback for symmetric NAT |
 | MVP 4 | Free transit and exit, with NAT, quotas and QoS |
