@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] — 2026-09-01
+
+**A peer that changes address keeps its session.**
+
+The version is a patch by the maintainer's decision, keeping the 2.0.x series.
+Note that unlike 2.0.2 this one **does change behaviour**: an endpoint that moves
+is now followed instead of ending the session.
+
+### Added
+
+- **Roaming.** A peer whose address changes keeps the same session, the same
+  tunnel keys and the same authorization. Previously the change surfaced as a
+  stale handshake, the session was torn down, and the worker renegotiated from
+  nothing — discarding all three to learn a route.
+
+  This closes the M1.5 criterion *"endpoint muda e sessão se recupera"* and
+  `RF-NET-03`, both of which were open.
+
+- `nostmesh state` reports the current endpoint and how often it has moved. A
+  count that keeps climbing is a path that is not settling, and an operator
+  should see that while the session is still up rather than infer it afterwards
+  from a session that kept dying.
+
+### Fixed
+
+- **The fake WireGuard controller disagreed with the kernel about keepalives.**
+  It overwrote `PersistentKeepalive` unconditionally while the netlink adapter
+  only sets it when non-zero. Since reapplying a peer during a roam does not
+  restate the keepalive, a roam would have silently disabled it against the fake
+  and not against the kernel — killing a NAT'd session minutes later, far from
+  the cause. Found while building roaming; now under test.
+- **A roam could have stripped what a peer is routed.** The adapter replaces a
+  peer's AllowedIPs wholesale, so reapplying an empty set removes them. Guarded.
+- A test fixture built an established session with no recorded endpoint, a shape
+  production never produces.
+
+### Decisions
+
+- **NM-20** — following a roamed endpoint. Records why the kernel's own
+  authentication is sufficient proof where this project's connectivity check
+  cannot run: NM-15 hands the UDP port to the kernel when a session establishes,
+  so after that there is no socket to probe from. WireGuard moves a peer's
+  endpoint only after authenticating a packet under that session's tunnel keys,
+  which is a stronger credential than the probe would check.
+
+### Known limitations
+
+- **If both ends move at once, neither follows.** No authenticated packet reaches
+  either kernel, both sessions go stale, and the workers renegotiate. That is the
+  boundary where kernel-observed roaming stops and control-plane migration would
+  begin. It is not a regression — it is the previous behaviour for every move.
+- **One peer per node**, unchanged. The listen port is a single node-level value
+  and the interface name is fixed, so a second worker cannot bind.
+- **No relay fallback**, **no forward secrecy** in the signalling, and a
+  development keystore holding the private key unencrypted — all unchanged.
+
 ## [2.0.2] — 2026-09-01
 
 **Housekeeping. No behaviour changes.**
