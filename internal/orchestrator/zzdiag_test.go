@@ -5,40 +5,57 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
-func TestZZDiagRoam(t *testing.T) {
-	fixture := newHoldFixture(t)
+// How many journal writes a roam costs, and what each one costs.
+func TestZZDiagJournalCost(t *testing.T) {
+	dir := t.TempDir()
+	store := netstate.NewJournalStore(dir)
 
-	moved := netip.MustParseAddrPort("203.0.113.88:51820")
-	if err := fixture.controller.MoveEndpoint("nm0", fixture.tunnel, moved); err != nil {
-		t.Fatalf("moving: %v", err)
-	}
+	tx := netstate.NewTransaction("diag", "nm0", time.Now())
 
 	start := time.Now()
-	obs, err := fixture.driver.observePeer(context.Background(), fixture.tunnel)
-	t.Logf("observePeer took %s: err=%v endpoint=%v", time.Since(start), err, obs.Endpoint)
+	if err := store.Save(tx); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	t.Logf("one journal Save took %s (tmpdir=%s)", time.Since(start), dir)
 
 	start = time.Now()
-	rerr := fixture.driver.manager.RecordObservedEndpoint(context.Background(), fixture.peer, moved, "nm0")
-	t.Logf("RecordObservedEndpoint took %s: err=%v", time.Since(start), rerr)
+	for range 10 {
+		_ = store.Save(tx)
+	}
+	t.Logf("ten journal Saves took %s", time.Since(start))
 }
 
-// How long a single journalled apply costs here.
-func TestZZDiagApplyCost(t *testing.T) {
+// How many operations a roam plan contains.
+func TestZZDiagPlanSize(t *testing.T) {
 	fixture := newHoldFixture(t)
 
-	for i := range 3 {
-		addr := netip.MustParseAddrPort("203.0.113.88:51820")
-		if i == 1 {
-			addr = netip.MustParseAddrPort("203.0.113.89:51820")
-		}
-		if i == 2 {
-			addr = netip.MustParseAddrPort("203.0.113.90:51820")
-		}
-		fixture.clock.advance(time.Minute)
-		start := time.Now()
-		err := fixture.driver.manager.RecordObservedEndpoint(context.Background(), fixture.peer, addr, "nm0")
-		t.Logf("apply %d took %s err=%v", i, time.Since(start), err)
+	iface, err := fixture.controller.ObserveInterface(context.Background(), "nm0")
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+
+	spec := wireguard.InterfaceSpec{
+		Name: iface.Name, ListenPort: iface.ListenPort,
+		Addresses: iface.Addresses, MTU: iface.MTU,
+	}
+	endpoint := netip.MustParseAddrPort("203.0.113.88:51820")
+	peer := wireguard.PeerSpec{
+		PublicKey: fixture.tunnel, Endpoint: &endpoint,
+		AllowedIPs: iface.Peers[0].AllowedIPs,
+	}
+
+	plan, err := fixture.driver.manager.netstate.PlanInterface(
+		context.Background(), "diag-plan", spec, []wireguard.PeerSpec{peer})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	t.Logf("roam plan has %d operations", len(plan.Operations))
+	for _, op := range plan.Operations {
+		t.Logf("  %s %s", op.Kind, op.Target)
 	}
 }
