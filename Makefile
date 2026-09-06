@@ -6,7 +6,13 @@
 BINARY      := nostmesh
 GO          ?= go
 # The full image, not alpine: the race detector requires a C toolchain.
-GO_IMAGE    ?= golang:1.25
+#
+# By digest rather than tag, because a tag can be republished and a build that
+# silently changes toolchain is what this prevents. The version is named here
+# because a bare digest tells a reader nothing. See NM-23.
+#
+# golang:1.25.14
+GO_IMAGE    ?= golang@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80
 
 # Run containers as the calling user. Without this, anything a container writes
 # — fuzz corpus, coverage profiles, build output — lands owned by root, and the
@@ -21,8 +27,11 @@ DOCKER_ENV := -e GOFLAGS=-buildvcs=false \
 	-e GOCACHE=/tmp/.gocache \
 	-e GOMODCACHE=/tmp/.gomodcache \
 	-e GOLANGCI_LINT_CACHE=/tmp/.lintcache
-# Pinned so local runs and CI analyze with the same linter version.
-LINT_IMAGE  ?= golangci/golangci-lint:v2.13.2
+# Pinned so local runs and CI analyze with the same linter version, and by
+# digest so the tag cannot be republished underneath it.
+#
+# golangci/golangci-lint:v2.13.2
+LINT_IMAGE  ?= golangci/golangci-lint@sha256:ba07dffad130794ae79ebaa0056809d18c0168f3f846480ffd3eb6c04578b83d
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE        ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
