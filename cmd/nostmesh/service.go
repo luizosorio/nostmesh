@@ -222,7 +222,16 @@ func runServe(args []string, stdout, stderr *output) int {
 		return exitError
 	}
 
-	logger := newLogger(cfg, stderr)
+	logger, logFile, err := newLogger(cfg, stderr)
+	if err != nil {
+		// A configured log file that cannot be opened stops the service. An
+		// operator who asked for one and got no error believes they have an
+		// audit trail, and leaving them with one that was never written is
+		// worse than refusing to start where the cause is still visible.
+		stderr.printf("nostmesh serve: %v\n", err)
+		return exitError
+	}
+	defer func() { _ = logFile.Close() }()
 
 	svc := &service{
 		cfg:      cfg,

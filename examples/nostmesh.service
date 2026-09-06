@@ -39,6 +39,12 @@ StateDirectory=nostmesh
 StateDirectoryMode=0700
 ConfigurationDirectory=nostmesh
 
+# Logs reach the journal through stderr and need nothing here. This exists for
+# the optional log.file copy: ProtectSystem=strict leaves nothing else writable,
+# so without this directive a configured log file cannot be opened at all.
+LogsDirectory=nostmesh
+LogsDirectoryMode=0700
+
 # The private key is the node's identity: a process that cannot dump core cannot
 # have it read out of one.
 LimitCORE=0

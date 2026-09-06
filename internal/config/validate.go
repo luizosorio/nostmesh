@@ -173,7 +173,45 @@ func (l Log) validate() Errors {
 		errs = append(errs, Error{"log.format", fmt.Sprintf("must be one of %s, got %q", strings.Join(validLogFormats, ", "), l.Format)})
 	}
 
+	errs = append(errs, validateLogFile(l.File)...)
+
 	return errs
+}
+
+// validateLogFile checks the optional second sink.
+func validateLogFile(path string) Errors {
+	if path == "" {
+		return nil
+	}
+
+	if !filepath.IsAbs(path) {
+		return Errors{{"log.file", fmt.Sprintf(
+			"must be an absolute path; a relative one resolves against the service's working directory, got %q", path)}}
+	}
+	if filepath.Clean(path) != path {
+		return Errors{{"log.file", fmt.Sprintf("must be a clean path, got %q", path)}}
+	}
+
+	// A directory ends in a separator or names an existing directory; either
+	// way opening it for append fails, and saying so now is cheaper than at
+	// startup.
+	if strings.HasSuffix(path, string(filepath.Separator)) {
+		return Errors{{"log.file", fmt.Sprintf("must name a file, not a directory, got %q", path)}}
+	}
+
+	// Deliberately not checked here: whether the path is one the packaged unit
+	// can write to.
+	//
+	// Under systemd, ProtectSystem=strict leaves only the directory granted by
+	// LogsDirectory= writable, so a path elsewhere will not open. But the binary
+	// is self-contained and runs without a supervisor, where any writable path
+	// is legitimate — a laboratory run logging to a temporary directory is the
+	// ordinary case, not a mistake.
+	//
+	// Refusing it here would make the unpackaged case impossible in order to
+	// give the packaged one a better error message. The packaged case gets that
+	// message anyway: opening the file fails at startup and reports the path.
+	return nil
 }
 
 func (p Policy) validate() Errors {
