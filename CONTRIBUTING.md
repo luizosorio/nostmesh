@@ -200,6 +200,30 @@ alternative or an ADR explaining why the constraint should change.
 Prefer the standard library. Every dependency is a supply-chain liability and a
 license obligation; the bar for adding one is real.
 
+### Pin everything external
+
+Anything the build pulls from outside is referenced by an identifier that cannot
+change under it:
+
+| What | Referenced by |
+|---|---|
+| Go modules | exact version, plus the `go.sum` hash |
+| Go toolchain | exact patch version — `1.25.14`, not `1.25` |
+| GitHub Actions | commit SHA, with the version in a trailing comment |
+| Container images | `name@sha256:...` digest, with the tag in a comment |
+
+A tag is a mutable pointer. An upstream repository can move `v4` to a different
+commit, and every build afterwards runs code nobody here reviewed — for an action
+that means arbitrary code with access to the checkout and the job token. A
+version range has the same problem more quietly: it changes when somebody
+publishes, which is not a moment anyone here chose.
+
+Keep the human-readable version beside the pin. A bare SHA says nothing about
+what it is, and the comment is what makes an update reviewable.
+
+Updating one is a deliberate commit. That is the cost of this, and also the
+point.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).
