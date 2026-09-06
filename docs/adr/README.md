@@ -47,3 +47,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-18](NM-18-service-process-model.md) | Service process model | Accepted |
 | [NM-19](NM-19-identity-import.md) | Adopting an existing Nostr identity | Accepted |
 | [NM-20](NM-20-kernel-observed-roaming.md) | Following a roamed endpoint | Accepted |
+| [NM-21](NM-21-overlay-addressing-and-network-manifest.md) | Overlay addressing and the network manifest | Accepted |
