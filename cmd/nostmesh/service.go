@@ -15,6 +15,7 @@ import (
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
@@ -183,7 +184,7 @@ func (s *service) recoverHostState(ctx context.Context) {
 	instance, cleanup, err := buildOrchestrator(s.cfg)
 	if err != nil {
 		s.log.Warn("could not check for leftover state",
-			slog.String("event", "service.recovery.skipped"),
+			observability.Event("service.recovery.skipped"),
 			slog.String("error", err.Error()))
 		return
 	}
@@ -191,20 +192,20 @@ func (s *service) recoverHostState(ctx context.Context) {
 
 	if _, err := instance.Recover(ctx); err != nil {
 		s.log.Warn("journal recovery did not complete",
-			slog.String("event", "service.recovery.failed"),
+			observability.Event("service.recovery.failed"),
 			slog.String("error", err.Error()))
 	}
 
 	result, err := instance.Down(ctx)
 	if err != nil {
 		s.log.Warn("leftover state could not be removed",
-			slog.String("event", "service.recovery.failed"),
+			observability.Event("service.recovery.failed"),
 			slog.String("error", err.Error()))
 		return
 	}
 	for _, removed := range result.Removed {
 		s.log.Info("removed an interface left by an earlier run",
-			slog.String("event", "service.recovered"),
+			observability.Event("service.recovered"),
 			slog.String("interface", removed))
 	}
 }
@@ -234,8 +235,12 @@ func runServe(args []string, stdout, stderr *output) int {
 	defer func() { _ = logFile.Close() }()
 
 	svc := &service{
-		cfg:      cfg,
-		log:      logger,
+		cfg: cfg,
+
+		// Tagged with the component that emits it: a line saying a session
+		// failed without saying which layer observed the failure sends its
+		// reader to the wrong place.
+		log:      observability.Component(logger, observability.ComponentService),
 		self:     identity.PublicKey(),
 		config:   path,
 		workers:  make(map[domain.NostrPublicKey]*peerWorker),
@@ -257,7 +262,7 @@ func (s *service) run(stdout *output) int {
 	defer signal.Stop(signals)
 
 	s.log.Info("service starting",
-		slog.String("event", "service.started"),
+		observability.Event("service.started"),
 		slog.String("node", s.self.Short()),
 		slog.Int("relays", len(s.cfg.Node.Relays)))
 
@@ -267,7 +272,7 @@ func (s *service) run(stdout *output) int {
 	// that cannot be inspected remotely, but it still holds its tunnels.
 	if listener, err := listenControl(controlSocketPath(s.cfg.Node.StateDir)); err != nil {
 		s.log.Warn("state cannot be inspected while this runs",
-			slog.String("event", "control.unavailable"),
+			observability.Event("control.unavailable"),
 			slog.String("error", err.Error()))
 	} else {
 		defer func() { _ = listener.Close() }()
@@ -285,7 +290,7 @@ func (s *service) run(stdout *output) int {
 
 	if err := s.reconcile(ctx, s.cfg); err != nil {
 		s.log.Error("initial peers could not be started",
-			slog.String("event", "service.start.failed"),
+			observability.Event("service.start.failed"),
 			slog.String("error", err.Error()))
 		return exitError
 	}
@@ -303,7 +308,7 @@ func (s *service) run(stdout *output) int {
 			}
 
 			s.log.Info("service stopping",
-				slog.String("event", "service.stopping"),
+				observability.Event("service.stopping"),
 				slog.String("signal", received.String()))
 			cancel()
 			s.stopAll()
@@ -322,7 +327,7 @@ func (s *service) reload(ctx context.Context) {
 	cfg, err := config.Load(s.config)
 	if err != nil {
 		s.log.Error("configuration was not reloaded",
-			slog.String("event", "config.reload.failed"),
+			observability.Event("config.reload.failed"),
 			slog.String("error", err.Error()))
 		return
 	}
@@ -332,13 +337,13 @@ func (s *service) reload(ctx context.Context) {
 	// support it would be worse than refusing.
 	if changed := nodeSettingsChanged(s.cfg, cfg); len(changed) > 0 {
 		s.log.Warn("node settings changed but need a restart to take effect",
-			slog.String("event", "config.reload.ignored"),
+			observability.Event("config.reload.ignored"),
 			slog.Any("fields", changed))
 	}
 
 	if err := s.reconcile(ctx, cfg); err != nil {
 		s.log.Error("configuration was not reloaded",
-			slog.String("event", "config.reload.failed"),
+			observability.Event("config.reload.failed"),
 			slog.String("error", err.Error()))
 		return
 	}
@@ -395,7 +400,7 @@ func (s *service) reconcile(ctx context.Context, cfg config.Config) error {
 	}
 
 	s.log.Info("configuration applied",
-		slog.String("event", "config.reloaded"),
+		observability.Event("config.reloaded"),
 		slog.Int("started", started),
 		slog.Int("stopped", stopped),
 		slog.Int("running", len(wanted)))
@@ -413,7 +418,7 @@ func (s *service) start(ctx context.Context, cfg config.Config, peer domain.Nost
 		cancel: cancel,
 		done:   make(chan struct{}),
 		log: s.log.With(
-			slog.String("peer", peer.Short()),
+			observability.Peer(peer),
 			slog.String("alias", grant.Alias)),
 	}
 
@@ -422,7 +427,7 @@ func (s *service) start(ctx context.Context, cfg config.Config, peer domain.Nost
 	s.mu.Unlock()
 
 	worker.log.Info("peer authorized",
-		slog.String("event", "peer.added"),
+		observability.Event("peer.added"),
 		slog.Any("actions", actionNames(grant.Actions)))
 
 	go worker.run(workerCtx, cfg, s.answered)
@@ -439,7 +444,7 @@ func (s *service) stop(peer domain.NostrPublicKey, worker *peerWorker, reason st
 	_, established := worker.hadSession()
 
 	worker.log.Warn("peer authorization withdrawn",
-		slog.String("event", "peer.revoked"),
+		observability.Event("peer.revoked"),
 		slog.String("reason", reason),
 		slog.Bool("notified", established))
 
@@ -489,13 +494,13 @@ func (s *service) notifyRevoked(worker *peerWorker) {
 
 	if err := publishRevocation(ctx, s.cfg, worker.peer, session); err != nil {
 		worker.log.Warn("the peer was not told its authorization ended",
-			slog.String("event", "peer.revoked.notice.failed"),
+			observability.Event("peer.revoked.notice.failed"),
 			slog.String("error", err.Error()))
 		return
 	}
 
 	worker.log.Info("the peer was told its authorization ended",
-		slog.String("event", "peer.revoked.notice"),
+		observability.Event("peer.revoked.notice"),
 		slog.String("reason", string(protocol.ClosePolicy)))
 }
 
@@ -533,7 +538,7 @@ func (s *service) stopAll() {
 func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orchestrator.AnsweredSessions) {
 	defer close(w.done)
 
-	w.log.Info("worker started", slog.String("event", "peer.worker.started"))
+	w.log.Info("worker started", observability.Event("peer.worker.started"))
 	w.observe("starting", "", 0)
 
 	// Both ends are willing to do either job, and resolveRole settles which one
@@ -545,7 +550,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 	var consecutive int
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
-			w.log.Info("worker stopped", slog.String("event", "peer.worker.stopped"))
+			w.log.Info("worker stopped", observability.Event("peer.worker.stopped"))
 			return
 		}
 
@@ -556,7 +561,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 
 		switch {
 		case ctx.Err() != nil:
-			w.log.Info("worker stopped", slog.String("event", "peer.worker.stopped"))
+			w.log.Info("worker stopped", observability.Event("peer.worker.stopped"))
 			return
 
 		case errors.Is(err, orchestrator.ErrNoRequest):
@@ -566,7 +571,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 			consecutive = 0
 			w.observe("connecting", err.Error(), attempt)
 			w.log.Info("no peer opened a session; opening one next",
-				slog.String("event", "session.waited"),
+				observability.Event("session.waited"),
 				slog.String("reason", err.Error()))
 
 		case errors.Is(err, orchestrator.ErrSessionDropped):
@@ -577,7 +582,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 			consecutive = 0
 			w.observe("reconnecting", err.Error(), attempt)
 			w.log.Warn("session ended",
-				slog.String("event", "session.dropped"),
+				observability.Event("session.dropped"),
 				slog.Int64("held_ms", time.Since(started).Milliseconds()),
 				slog.String("reason", err.Error()))
 
@@ -589,14 +594,14 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 			consecutive++
 			w.observe("retrying", err.Error(), attempt)
 			w.log.Warn("attempt did not complete",
-				slog.String("event", "session.failed"),
+				observability.Event("session.failed"),
 				slog.Int("attempt", attempt),
 				slog.String("reason", err.Error()))
 		}
 
 		select {
 		case <-ctx.Done():
-			w.log.Info("worker stopped", slog.String("event", "peer.worker.stopped"))
+			w.log.Info("worker stopped", observability.Event("peer.worker.stopped"))
 			return
 		case <-time.After(retryDelay(consecutive)):
 		}
@@ -662,11 +667,7 @@ func roleAfter(err error) orchestrator.Role {
 func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
 	answered *orchestrator.AnsweredSessions, role orchestrator.Role,
 ) error {
-	trace := func(line string) {
-		w.log.Debug(line, slog.String("event", "session.trace"))
-	}
-
-	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, trace, answered)
+	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, w.log, answered)
 	if err != nil {
 		return err
 	}
@@ -702,7 +703,7 @@ func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
 	// by another name.
 	if releaseErr := runtime.driver.Release(ctx, w.peer); releaseErr != nil {
 		w.log.Warn("could not release the session",
-			slog.String("event", "session.release.failed"),
+			observability.Event("session.release.failed"),
 			slog.String("reason", releaseErr.Error()))
 	}
 	return err

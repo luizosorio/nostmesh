@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"path/filepath"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/nostr"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
@@ -37,7 +39,7 @@ type sessionRuntime struct {
 // configuration file, which is the local operator's statement of what this node
 // will accept — never from anything a peer sends.
 func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration, trace func(string), answered *orchestrator.AnsweredSessions,
+	timeout time.Duration, log *slog.Logger, answered *orchestrator.AnsweredSessions,
 ) (*sessionRuntime, error) {
 	adapter, closeAdapter, err := wireguard.NewController()
 	if err != nil {
@@ -124,7 +126,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 	if err != nil {
 		return fail(err)
 	}
-	plane.trace = trace
+	plane.log = observability.Component(log, observability.ComponentNostr)
 
 	if err := set.SubscribeToInbox(ctx, nodeIdentity.PublicKey()); err != nil {
 		return fail(err)

@@ -7,14 +7,40 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/nostr"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/protocol"
+)
+
+// Refusals this node makes about a message a peer sent.
+//
+// Named rather than built inline so that classification matches on the error
+// itself. Comparing message text would stop classifying the first time a string
+// was reworded, and the failure mode is a log that reports "malformed" about a
+// refusal it knows the real reason for.
+var (
+	// errPlaneClosed reports the control plane shutting down mid-wait.
+	errPlaneClosed = errors.New("control plane closed")
+
+	// errNotFromPeer reports an event signed by somebody else. A relay carries
+	// other people's traffic, so this is ordinary rather than an attack.
+	errNotFromPeer = errors.New("event is not from the expected peer")
+
+	// errSenderMismatch reports an envelope naming a sender other than the key
+	// that signed it. Without this check the cleartext fields could name anyone
+	// and the signature would still verify against its true author.
+	errSenderMismatch = errors.New("envelope sender does not match the signing key")
+
+	// errWrongSession reports a message belonging to a different conversation,
+	// which is what a relay replaying an earlier session looks like.
+	errWrongSession = errors.New("message belongs to another session")
 )
 
 // controlPlane carries the driver's payloads over Nostr.
@@ -36,10 +62,11 @@ type controlPlane struct {
 	// inbound carries what the relay subscription delivered, already opened.
 	inbound <-chan nostr.Received
 
-	// trace, when set, reports each accepted message. Wiring a session together
+	// log reports what the conversation carried. Wiring a session together
 	// spans a transport, a driver and two hosts, and a failure at any point
-	// looks identical from outside: a wait that ends empty.
-	trace func(string)
+	// looks identical from outside: a wait that ends empty, so saying what did
+	// arrive is most of the diagnosis.
+	log *slog.Logger
 
 	mu        sync.Mutex
 	rejected  int
@@ -76,6 +103,10 @@ func newControlPlane(ctx context.Context, set *nostr.RelaySet, identity domain.N
 	}
 
 	plane := &controlPlane{
+		// Never nil: an unwired plane logs nothing rather than panicking on
+		// every message, which is the ordinary state in a test that does not
+		// care about output.
+		log:      observability.Discard(),
 		set:      set,
 		codec:    nostr.NewCodec(clock),
 		signer:   signer,
@@ -237,14 +268,18 @@ func (c *controlPlane) Next(ctx context.Context) (orchestrator.Delivery, error) 
 
 		case received, open := <-c.inbound:
 			if !open {
-				return orchestrator.Delivery{}, errors.New("control plane closed")
+				return orchestrator.Delivery{}, errPlaneClosed
 			}
 
 			delivery, err := c.open(received)
 			if err != nil {
-				if c.trace != nil {
-					c.trace(fmt.Sprintf("refused a message: %v", err))
-				}
+				// The error is classified rather than rendered. It is derived
+				// from what a peer sent, and the protocol specification is
+				// explicit that rejected content never reaches a log in full.
+				c.log.Debug("message refused",
+					observability.Event("envelope.rejected"),
+					observability.Result(observability.ResultRefused),
+					observability.Reason(classifyRejection(err)))
 				// A rejected message is not fatal — relays carry other
 				// people's traffic, and a message for another session or
 				// another node is ordinary. But discarding silently is how a
@@ -255,10 +290,11 @@ func (c *controlPlane) Next(ctx context.Context) (orchestrator.Delivery, error) 
 				continue
 			}
 
-			if c.trace != nil {
-				c.trace(fmt.Sprintf("accepted %s seq=%d session=%s",
-					delivery.Kind, delivery.Seq, abbreviateID(delivery.SessionID)))
-			}
+			c.log.Debug("payload decrypted",
+				observability.Event("envelope.decrypted"),
+				observability.Session(delivery.SessionID),
+				slog.String("type", string(delivery.Kind)),
+				slog.Uint64("seq", delivery.Seq))
 			return delivery, nil
 		}
 	}
@@ -281,7 +317,7 @@ func (c *controlPlane) open(received nostr.Received) (orchestrator.Delivery, err
 	// An event signed by someone other than the peer is not part of this
 	// conversation, whatever it claims inside.
 	if event.PublicKey != c.peer.String() {
-		return orchestrator.Delivery{}, errors.New("event is not from the expected peer")
+		return orchestrator.Delivery{}, errNotFromPeer
 	}
 
 	var envelope protocol.Envelope
@@ -300,7 +336,7 @@ func (c *controlPlane) open(received nostr.Received) (orchestrator.Delivery, err
 	// the event. Without this the cleartext fields could name anyone, and the
 	// signature would still verify against its true author.
 	if envelope.Sender != event.PublicKey {
-		return orchestrator.Delivery{}, errors.New("envelope sender does not match the signing key")
+		return orchestrator.Delivery{}, errSenderMismatch
 	}
 
 	// A relay stores events and replays them to a new subscription, so a
@@ -367,7 +403,7 @@ func (c *controlPlane) matchesSession(envelope protocol.Envelope) error {
 		return nil
 	}
 	if envelope.SessionID != c.sessions {
-		return fmt.Errorf("message belongs to session %s, this conversation is %s",
+		return fmt.Errorf("%w: %s, this conversation is %s", errWrongSession,
 			abbreviateID(envelope.SessionID), abbreviateID(c.sessions))
 	}
 	return nil
