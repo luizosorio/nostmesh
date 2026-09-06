@@ -3,10 +3,13 @@ package connectivity
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/luizosorio/nostmesh/internal/observability"
 )
 
 // Limits bound what a session may attempt.
@@ -71,6 +74,12 @@ type Engine struct {
 	candidates map[string]*Candidate
 	clock      func() time.Time
 
+	// log reports which paths were tried and which one won. Never nil.
+	log *slog.Logger
+
+	// diagnostic gates how much of a candidate address is written.
+	diagnostic observability.Diagnostic
+
 	// thirdPartyCount tracks how many candidates came from strangers, so the
 	// limit applies to the source rather than the total.
 	thirdPartyCount int
@@ -86,6 +95,12 @@ type EngineOptions struct {
 	SessionID string
 	Limits    Limits
 	Clock     func() time.Time
+
+	// Logger reports which paths were tried and which one won. Optional.
+	Logger *slog.Logger
+
+	// Diagnostic gates how much of a candidate address is written.
+	Diagnostic observability.Diagnostic
 }
 
 // NewEngine builds an Engine.
@@ -99,10 +114,15 @@ func NewEngine(opts EngineOptions) (*Engine, error) {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
+	if opts.Logger == nil {
+		opts.Logger = observability.Discard()
+	}
 
 	return &Engine{
 		sessionID:  opts.SessionID,
 		limits:     opts.Limits,
+		log:        observability.Component(opts.Logger, observability.ComponentConnectivity),
+		diagnostic: opts.Diagnostic,
 		candidates: make(map[string]*Candidate),
 		clock:      opts.Clock,
 		startedAt:  opts.Clock(),
@@ -234,9 +254,24 @@ func (e *Engine) RecordSuccess(id string, roundTrip time.Duration) error {
 
 	// The first verified candidate wins. Priority ordering already put the
 	// preferred paths first, so the first success is the best available.
-	if e.nominated == nil {
+	nominated := e.nominated == nil
+	if nominated {
 		e.nominated = candidate
 	}
+
+	// The one line an operator wants from this whole subsystem: which path was
+	// proven, how it was found, and how far away it is. UNVERIFIED to VALID is
+	// the transition the security model turns on, so it is recorded at info
+	// rather than left to debug.
+	e.log.Info("candidate verified",
+		observability.Event("candidate.promoted"),
+		observability.Session(e.sessionID),
+		slog.String("candidate", candidate.ID),
+		slog.String("kind", string(candidate.Kind)),
+		observability.Endpoint(candidate.Address, e.diagnostic),
+		slog.Int64("rtt_ms", roundTrip.Milliseconds()),
+		slog.Bool("nominated", nominated))
+
 	return nil
 }
 

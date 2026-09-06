@@ -144,8 +144,10 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 			Order:     connectivity.DefaultGatherPolicy().Order,
 			Observers: cfg.Node.Observers,
 		},
-		Observer: observer,
-		Clock:    clock.Now,
+		Observer:   observer,
+		Clock:      clock.Now,
+		Logger:     log,
+		Diagnostic: observability.ParseDiagnostic(cfg.Log.Diagnostic),
 	})
 
 	options, err := driverOptions(cfg, peer, timeout)

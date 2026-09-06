@@ -989,8 +989,10 @@ func (d *Driver) verifyPath(ctx context.Context, handshake *session.Handshake,
 	}
 
 	engine, err := connectivity.NewEngine(connectivity.EngineOptions{
-		SessionID: handshake.SessionID().String(),
-		Clock:     d.clock.Now,
+		SessionID:  handshake.SessionID().String(),
+		Clock:      d.clock.Now,
+		Logger:     d.log,
+		Diagnostic: d.options.Diagnostic,
 	})
 	if err != nil {
 		return nil, err
