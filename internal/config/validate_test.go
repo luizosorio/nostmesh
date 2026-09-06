@@ -1,7 +1,9 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -58,6 +60,51 @@ func TestValidateAcceptsALogFileOutsideThePackagedDirectory(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("a log path outside the packaged directory was refused: %v", err)
+	}
+}
+
+// Values derived from visible seeds, so a secret scanner has nothing to
+// classify: a public key and a salt are the same 32 bytes as a private key.
+var (
+	testIssuerHex = derivedHex("nostmesh config test issuer")
+	testSaltHex   = derivedHex("nostmesh config test salt")
+)
+
+func derivedHex(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(digest[:])
+}
+
+// A node with no network configured stays valid.
+//
+// This is the criterion that keeps MVP 1 working: every deployment written
+// before derived addressing has no network block, and must go on validating.
+func TestAConfigurationWithoutANetworkIsValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Node.OverlayAddress = "100.96.0.1/32"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a configuration without a network was refused: %v", err)
+	}
+	if cfg.Network.Enabled() {
+		t.Error("an empty network block reported itself as enabled")
+	}
+}
+
+// A fully configured network is valid.
+func TestACompleteNetworkIsValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Network = Network{
+		Manifest: "/etc/nostmesh/network.json",
+		Issuer:   testIssuerHex,
+		Salt:     testSaltHex,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a complete network was refused: %v", err)
+	}
+	if !cfg.Network.Enabled() {
+		t.Error("a complete network reported itself as disabled")
 	}
 }
 
@@ -152,6 +199,58 @@ func TestValidateRejects(t *testing.T) {
 			name:      "unknown diagnostic mode",
 			mutate:    func(c *Config) { c.Log.Diagnostic = "verbose" },
 			wantField: "log.diagnostic",
+		},
+		{
+			name:      "network without an issuer",
+			mutate:    func(c *Config) { c.Network.Manifest = "/etc/nostmesh/network.json" },
+			wantField: "network.issuer",
+		},
+		{
+			name: "network without a salt",
+			mutate: func(c *Config) {
+				c.Network.Manifest = "/etc/nostmesh/network.json"
+				c.Network.Issuer = testIssuerHex
+			},
+			wantField: "network.salt",
+		},
+		{
+			name: "network without a manifest",
+			mutate: func(c *Config) {
+				c.Network.Issuer = testIssuerHex
+				c.Network.Salt = testSaltHex
+			},
+			wantField: "network.manifest",
+		},
+		{
+			name: "relative manifest path",
+			mutate: func(c *Config) {
+				c.Network = Network{Manifest: "network.json", Issuer: testIssuerHex, Salt: testSaltHex}
+			},
+			wantField: "network.manifest",
+		},
+		{
+			name: "an issuer that is not a key",
+			mutate: func(c *Config) {
+				c.Network = Network{Manifest: "/etc/nostmesh/network.json", Issuer: "nonsense", Salt: testSaltHex}
+			},
+			wantField: "network.issuer",
+		},
+		{
+			name: "a salt of the wrong length",
+			mutate: func(c *Config) {
+				c.Network = Network{Manifest: "/etc/nostmesh/network.json", Issuer: testIssuerHex, Salt: "abcd"}
+			},
+			wantField: "network.salt",
+		},
+		{
+			name: "a negative subnet",
+			mutate: func(c *Config) {
+				c.Network = Network{
+					Manifest: "/etc/nostmesh/network.json", Issuer: testIssuerHex,
+					Salt: testSaltHex, Subnet: -1,
+				}
+			},
+			wantField: "network.subnet",
 		},
 		{
 			name:      "allow by default",

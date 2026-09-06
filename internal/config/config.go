@@ -23,6 +23,55 @@ type Config struct {
 	// Peers lists manually configured peers. MVP 0 has no discovery, so this is
 	// the only way a peer becomes known.
 	Peers []Peer `toml:"peers" json:"peers"`
+
+	// Network configures derived addressing. Optional: a node without it keeps
+	// using the manually chosen node.overlay_address, which is what every
+	// deployment before this did and must keep doing.
+	Network Network `toml:"network" json:"network,omitempty"`
+}
+
+// Network configures a node's membership of an overlay network.
+//
+// It is optional and off by default. Setting it makes this node derive its
+// address from the manifest rather than take one from node.overlay_address, per
+// NM-21 — but nothing about it changes what a node without it does.
+type Network struct {
+	// Manifest is the path to the signed manifest describing the network.
+	//
+	// A file rather than a relay subscription for now: the manifest's transport
+	// is a separate delivery, and reading one from disk is what makes the rest
+	// of this testable and deployable in the meantime.
+	Manifest string `toml:"manifest" json:"manifest,omitempty"`
+
+	// Issuer is the Nostr public key this node pins as the manifest's author,
+	// hex-encoded.
+	//
+	// The pin is what makes a manifest local intent rather than remote
+	// authority: a manifest signed by anyone else is not this network's,
+	// whatever it claims inside. There is no default, and an absent one means
+	// no manifest is accepted at all.
+	Issuer string `toml:"issuer" json:"issuer,omitempty"`
+
+	// Salt is the network's shared secret, hex-encoded.
+	//
+	// It never appears in the manifest and is distributed out of band, which is
+	// what stops a relay operator holding every published event from deriving a
+	// single member's address. Treat it as a secret: a node's configuration file
+	// is already 0600 for the same reason.
+	Salt string `toml:"salt" json:"salt,omitempty"`
+
+	// Subnet selects which of the manifest's subnets this node uses. Zero is
+	// the first, which is what a network that never carved one wants.
+	Subnet int `toml:"subnet" json:"subnet,omitempty"`
+}
+
+// Enabled reports whether derived addressing is configured.
+//
+// All three of manifest, issuer and salt are needed: a manifest without an
+// issuer cannot be trusted, and one without a salt cannot derive anything.
+// Partial configuration is a mistake rather than a mode, and validation says so.
+func (n Network) Enabled() bool {
+	return n.Manifest != "" || n.Issuer != "" || n.Salt != ""
 }
 
 // Node holds node-level settings.

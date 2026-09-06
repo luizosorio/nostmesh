@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/luizosorio/nostmesh/internal/domain"
 )
 
 // Error is a single validation failure.
@@ -67,6 +69,7 @@ func (c Config) Validate() error {
 
 	errs = append(errs, c.Node.validate()...)
 	errs = append(errs, c.Log.validate()...)
+	errs = append(errs, c.Network.validate()...)
 	errs = append(errs, c.Policy.validate()...)
 	errs = append(errs, validatePeers(c.Peers)...)
 
@@ -221,6 +224,50 @@ func validateLogFile(path string) Errors {
 	// give the packaged one a better error message. The packaged case gets that
 	// message anyway: opening the file fails at startup and reports the path.
 	return nil
+}
+
+// validate checks the optional network configuration.
+func (n Network) validate() Errors {
+	if !n.Enabled() {
+		// Absent entirely, which is the ordinary case and stays valid: a node
+		// without a network keeps using node.overlay_address.
+		return nil
+	}
+
+	var errs Errors
+
+	// Partial configuration is refused rather than half-applied. A manifest with
+	// no issuer cannot be trusted and a network with no salt cannot derive
+	// anything, so a node that started with any of the three and not the others
+	// would silently fall back to manual addressing while its operator believed
+	// otherwise.
+	if n.Manifest == "" {
+		errs = append(errs, Error{"network.manifest", "must be set when a network is configured"})
+	} else if !filepath.IsAbs(n.Manifest) {
+		errs = append(errs, Error{"network.manifest", fmt.Sprintf(
+			"must be an absolute path, got %q", n.Manifest)})
+	}
+
+	if n.Issuer == "" {
+		errs = append(errs, Error{"network.issuer", "must be set; without a pinned issuer no manifest can be trusted"})
+	} else if _, err := domain.ParseNostrPublicKey(n.Issuer); err != nil {
+		errs = append(errs, Error{"network.issuer", fmt.Sprintf("must be a hex-encoded Nostr public key: %v", err)})
+	}
+
+	if n.Salt == "" {
+		errs = append(errs, Error{"network.salt", "must be set; without a salt no address can be derived"})
+	} else if raw, err := hex.DecodeString(n.Salt); err != nil {
+		errs = append(errs, Error{"network.salt", "must be hex-encoded"})
+	} else if _, err := domain.NewNetworkSalt(raw); err != nil {
+		errs = append(errs, Error{"network.salt", fmt.Sprintf(
+			"must be %d bytes, got %d", domain.NetworkSaltSize, len(raw))})
+	}
+
+	if n.Subnet < 0 {
+		errs = append(errs, Error{"network.subnet", fmt.Sprintf("must not be negative, got %d", n.Subnet)})
+	}
+
+	return errs
 }
 
 func (p Policy) validate() Errors {
