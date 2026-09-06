@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 )
 
@@ -35,6 +37,10 @@ type RelaySet struct {
 	backoff BackoffPolicy
 	clock   func() time.Time
 	random  *rand.Rand
+
+	// log reports what the relays did. Never nil; a set built without one gets
+	// a discard logger.
+	log *slog.Logger
 
 	// self is the identity whose inbox is subscribed, kept so a reconnecting
 	// relay can reissue the subscription.
@@ -60,6 +66,10 @@ type RelaySetOptions struct {
 	Backoff BackoffPolicy
 	Clock   func() time.Time
 	Seed    int64
+
+	// Logger reports what the relays did. Optional: a set without one logs
+	// nothing rather than requiring every caller to supply a sink.
+	Logger *slog.Logger
 }
 
 // NewRelaySet builds a set from configured URLs.
@@ -76,6 +86,9 @@ func NewRelaySet(opts RelaySetOptions) (*RelaySet, error) {
 	}
 	if opts.Backoff.Initial <= 0 {
 		opts.Backoff = DefaultBackoff()
+	}
+	if opts.Logger == nil {
+		opts.Logger = observability.Discard()
 	}
 
 	relays := make([]*WebSocketRelay, 0, len(opts.URLs))
@@ -116,6 +129,7 @@ func NewRelaySet(opts RelaySetOptions) (*RelaySet, error) {
 		backoff: opts.Backoff,
 		clock:   opts.Clock,
 		random:  rand.New(rand.NewSource(opts.Seed)), //nolint:gosec // jitter, not cryptography
+		log:     observability.Component(opts.Logger, observability.ComponentNostr),
 	}, nil
 }
 
@@ -145,8 +159,18 @@ func (s *RelaySet) Connect(ctx context.Context) error {
 	for i, err := range failures {
 		if err == nil {
 			connected++
+			s.log.Info("relay connected",
+				observability.Event("relay.connected"),
+				slog.String("relay", s.relays[i].URL()))
 			continue
 		}
+		// The URL is configuration this operator wrote, so it is theirs to see;
+		// the error is from a dial rather than from a peer.
+		s.log.Warn("relay unreachable",
+			observability.Event("relay.disconnected"),
+			slog.String("relay", s.relays[i].URL()),
+			observability.Reason(observability.ReasonRelayUnreachable),
+			slog.String("error", err.Error()))
 		reasons = append(reasons, fmt.Errorf("%s: %w", s.relays[i].URL(), err))
 	}
 
@@ -248,8 +272,17 @@ func (s *RelaySet) SubscribeToInbox(ctx context.Context, self domain.NostrPublic
 	}
 
 	if subscribed == 0 {
+		s.log.Warn("no relay accepted the subscription",
+			observability.Event("relay.subscription.closed"),
+			observability.Result(observability.ResultFailed),
+			observability.Reason(observability.ReasonRelayClosed))
 		return fmt.Errorf("%w: no relay accepted the subscription", ErrNoRelayReachable)
 	}
+
+	s.log.Info("subscribed for messages",
+		observability.Event("relay.subscribed"),
+		slog.Int("relays", subscribed),
+		slog.Int64("since", since.Unix()))
 	return nil
 }
 

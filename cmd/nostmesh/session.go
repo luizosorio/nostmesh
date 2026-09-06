@@ -105,9 +105,13 @@ func runSession(cfg config.Config, peer domain.NostrPublicKey, role orchestrator
 	// Progress is printed as it happens. A session spans two hosts and several
 	// layers, and every failure in it looks the same from outside — a wait that
 	// ends empty — so saying what did arrive is most of the diagnosis.
-	trace := func(line string) { stdout.printf("  %s\n", line) }
+	//
+	// The same records the daemon writes as JSON are rendered here as prose,
+	// rather than carried as a second set of progress strings that could drift
+	// from the events they describe.
+	progress := sessionProgressLogger(stdout)
 
-	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, trace, nil)
+	runtime, err := buildSessionRuntime(ctx, cfg, peer, timeout, progress, nil)
 	if err != nil {
 		stderr.printf("nostmesh: %v\n", err)
 		return exitError
