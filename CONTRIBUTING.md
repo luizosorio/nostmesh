@@ -156,7 +156,26 @@ A PR is not ready to merge until:
 - failures leave the host in a safe, predictable state;
 - logs contain no keys, encrypted payloads, complete invoices or tokens;
 - lint, unit tests and relevant integration tests pass;
-- known limitations and new decisions are recorded.
+- known limitations and new decisions are recorded;
+- the work was exercised at debug level and the resulting logs were read.
+
+### Work with the logs on
+
+Run new work — implementations and tests alike — with logging at debug, and read
+what comes out before calling it done. Generating logs is not the same as using
+them: the point is to look at the record afterwards and ask whether it actually
+describes what happened.
+
+Use them when something breaks, too. Reach for the log before reading the code,
+because that is the order an operator will have to work in, and it is the only
+way to find out whether the log is any use.
+
+**When a log fails to explain a problem, improving it is part of the fix.** A
+gap found while debugging is the best evidence you will ever get about what the
+log should have said, and it is worth strictly less once the bug is solved and
+the context is gone. Leaving it for later means the next person diagnoses the
+same blind spot from scratch.
+
 
 ## Architecture decisions
 

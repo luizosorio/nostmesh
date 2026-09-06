@@ -48,3 +48,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-19](NM-19-identity-import.md) | Adopting an existing Nostr identity | Accepted |
 | [NM-20](NM-20-kernel-observed-roaming.md) | Following a roamed endpoint | Accepted |
 | [NM-21](NM-21-overlay-addressing-and-network-manifest.md) | Overlay addressing and the network manifest | Accepted |
+| [NM-22](NM-22-logging-and-diagnostics.md) | Logging and diagnostics | Accepted |
