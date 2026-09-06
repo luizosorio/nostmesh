@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"time"
+
+	"github.com/luizosorio/nostmesh/internal/observability"
 )
 
 // Method names a way of discovering a candidate.
@@ -158,6 +161,12 @@ type Gatherer struct {
 	interfaces InterfaceLister
 	observer   Observer
 	clock      func() time.Time
+
+	// log reports what discovery found. Never nil.
+	log *slog.Logger
+
+	// diagnostic gates how much of a candidate address is written.
+	diagnostic observability.Diagnostic
 }
 
 // GathererOptions configures a Gatherer.
@@ -166,6 +175,15 @@ type GathererOptions struct {
 	Interfaces InterfaceLister
 	Observer   Observer
 	Clock      func() time.Time
+
+	// Logger reports what discovery found. Optional: a gatherer without one
+	// logs nothing rather than requiring every caller to supply a sink.
+	Logger *slog.Logger
+
+	// Diagnostic gates how much of an address reaches a log. Candidates are
+	// where a private address would otherwise be written, so this is the field
+	// that decides it.
+	Diagnostic observability.Diagnostic
 }
 
 // NewGatherer builds a Gatherer.
@@ -179,11 +197,16 @@ func NewGatherer(opts GathererOptions) *Gatherer {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
+	if opts.Logger == nil {
+		opts.Logger = observability.Discard()
+	}
 
 	return &Gatherer{
 		policy:     opts.Policy,
 		interfaces: opts.Interfaces,
 		observer:   opts.Observer,
+		log:        observability.Component(opts.Logger, observability.ComponentConnectivity),
+		diagnostic: opts.Diagnostic,
 		clock:      opts.Clock,
 	}
 }
@@ -207,6 +230,11 @@ type GatherResult struct {
 // address never contacts an observer, so no stranger learns it exists.
 func (g *Gatherer) Gather(ctx context.Context, localPort int) GatherResult {
 	result := GatherResult{Failures: make(map[Method]error)}
+	started := g.clock()
+
+	g.log.Debug("gathering candidates",
+		observability.Event("candidate.gather.started"),
+		slog.Any("methods", methodNames(g.policy.Order)))
 
 	for _, method := range g.policy.Order {
 		if ctx.Err() != nil {
@@ -218,8 +246,23 @@ func (g *Gatherer) Gather(ctx context.Context, localPort int) GatherResult {
 
 		found, err := g.gatherOne(ctx, method, localPort)
 		if err != nil {
+			// A method that finds nothing is ordinary — most nodes have no PCP
+			// and no observer configured — so this is not a warning. It is what
+			// explains an empty gather afterwards.
+			g.log.Debug("discovery method found nothing",
+				observability.Event("candidate.method.failed"),
+				slog.String("method", string(method)),
+				observability.Reason(classifyGatherFailure(err)))
 			result.Failures[method] = err
 			continue
+		}
+
+		for _, candidate := range found {
+			g.log.Debug("candidate found",
+				observability.Event("candidate.gathered"),
+				slog.String("method", string(method)),
+				slog.String("kind", string(candidate.Kind)),
+				observability.Endpoint(candidate.Address, g.diagnostic))
 		}
 		result.Candidates = append(result.Candidates, found...)
 
@@ -230,7 +273,25 @@ func (g *Gatherer) Gather(ctx context.Context, localPort int) GatherResult {
 		}
 	}
 
+	// One line an operator reads, whatever the loop above did. A gather that
+	// found nothing is the whole explanation for a session that never tries,
+	// and it is worth saying at info rather than leaving to debug.
+	g.log.Info("candidate discovery finished",
+		observability.Event("candidate.gather.done"),
+		slog.Int("count", len(result.Candidates)),
+		slog.Int("methods_tried", len(result.Attempted)),
+		observability.Duration(g.clock().Sub(started)))
+
 	return result
+}
+
+// methodNames renders the discovery order for a log line.
+func methodNames(methods []Method) []string {
+	names := make([]string, 0, len(methods))
+	for _, method := range methods {
+		names = append(names, string(method))
+	}
+	return names
 }
 
 // sufficient reports whether discovery can stop.
