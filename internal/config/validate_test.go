@@ -61,6 +61,20 @@ func TestValidateAcceptsALogFileOutsideThePackagedDirectory(t *testing.T) {
 	}
 }
 
+// An absent diagnostic setting means the closed one.
+//
+// A configuration written before this field existed must keep working, and it
+// must keep working closed: defaulting the other way would open disclosure on
+// every node that never asked for it.
+func TestAnAbsentDiagnosticSettingIsValidAndClosed(t *testing.T) {
+	cfg := validConfig()
+	cfg.Log.Diagnostic = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a configuration without a diagnostic setting was refused: %v", err)
+	}
+}
+
 // No log file at all is the default and stays valid.
 func TestValidateAcceptsNoLogFile(t *testing.T) {
 	cfg := validConfig()
@@ -133,6 +147,11 @@ func TestValidateRejects(t *testing.T) {
 			name:      "log file names a directory",
 			mutate:    func(c *Config) { c.Log.File = "/var/log/nostmesh/" },
 			wantField: "log.file",
+		},
+		{
+			name:      "unknown diagnostic mode",
+			mutate:    func(c *Config) { c.Log.Diagnostic = "verbose" },
+			wantField: "log.diagnostic",
 		},
 		{
 			name:      "allow by default",

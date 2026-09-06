@@ -166,6 +166,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Gatherer:   gatherer,
 		Clock:      clock,
 		Answered:   answered,
+		Logger:     log,
 	}, options)
 	if err != nil {
 		return fail(err)
@@ -244,6 +245,7 @@ func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
 		InterfaceName: interfaceName,
 		MTU:           cfg.Node.MTU,
 		Observers:     cfg.Node.Observers,
+		Diagnostic:    observability.ParseDiagnostic(cfg.Log.Diagnostic),
 
 		// The operator's --timeout governs the whole attempt, and waiting for a
 		// peer is most of it. A responder in particular is idle until the other

@@ -51,6 +51,10 @@ const (
 var (
 	validLogLevels  = []string{"debug", "info", "warn", "error"}
 	validLogFormats = []string{"json", "text"}
+
+	// The empty value is accepted separately and means the closed setting, so a
+	// configuration that never heard of this field discloses nothing extra.
+	validLogDiagnostics = []string{"off", "addresses"}
 )
 
 // Validate checks the configuration and returns every problem found.
@@ -174,6 +178,11 @@ func (l Log) validate() Errors {
 	}
 
 	errs = append(errs, validateLogFile(l.File)...)
+
+	if l.Diagnostic != "" && !slices.Contains(validLogDiagnostics, l.Diagnostic) {
+		errs = append(errs, Error{"log.diagnostic", fmt.Sprintf(
+			"must be one of %s, got %q", strings.Join(validLogDiagnostics, ", "), l.Diagnostic)})
+	}
 
 	return errs
 }
