@@ -12,6 +12,22 @@ import (
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
+// roamDeadline bounds a test that waits for a journalled network change.
+//
+// Following a moved endpoint writes a transaction through the journal, and the
+// journal fsyncs the file and then its directory on every state change — around
+// thirteen times for one roam. That is the durability the journal exists to
+// provide, and it makes the wait storage-bound rather than logic-bound: the same
+// roam costs microseconds on an NVMe host and roughly nine seconds on eMMC
+// behind a container overlay filesystem, a difference of two orders of
+// magnitude that has nothing to do with the code under test.
+//
+// So this is generous on purpose. A tighter bound does not catch a slower
+// implementation, it only reports the disk it happened to run on — which is
+// exactly how this guard came to fail on one machine while passing on another
+// and in CI.
+const roamDeadline = 60 * time.Second
+
 // holdFixture is a driver with one established session on the fake data plane.
 //
 // It reaches the state Hold starts from without running a negotiation, so the
@@ -362,7 +378,13 @@ func TestAHeldSessionFollowsAMovedEndpoint(t *testing.T) {
 	}
 
 	// The hold keeps the session alive while it follows.
-	deadline := time.After(2 * time.Second)
+	//
+	// The handshake is refreshed without advancing the clock. Moving it forward
+	// here would tie how far the fake clock travels to how long the journal
+	// takes to fsync, so on slow storage the session would age minutes while
+	// waiting for a single write — turning a staleness bound and a roaming
+	// hysteresis into functions of the disk.
+	deadline := time.After(roamDeadline)
 	for {
 		state, known := fixture.driver.manager.Get(fixture.peer)
 		if known && state.Endpoint != nil && *state.Endpoint == moved {
@@ -377,7 +399,6 @@ func TestAHeldSessionFollowsAMovedEndpoint(t *testing.T) {
 		default:
 		}
 
-		fixture.clock.advance(time.Second)
 		_ = fixture.controller.AdvanceHandshake("nm0", fixture.tunnel, fixture.clock.Now())
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -406,8 +427,20 @@ func TestAFailedFollowDoesNotEndTheSession(t *testing.T) {
 		t.Fatalf("moving the endpoint: %v", err)
 	}
 
-	for range 5 {
-		fixture.clock.advance(time.Second)
+	// Wait for the hold to have actually attempted the write, rather than for a
+	// fixed number of turns: a rollback journals several transactions, and on
+	// slow storage a fixed count can return before the attempt has happened at
+	// all — which would assert nothing while still passing.
+	deadline := time.After(roamDeadline)
+	for !fixture.controller.Attempted("ApplyPeer") {
+		select {
+		case err := <-done:
+			t.Fatalf("a bookkeeping failure ended a carrying session: %v", err)
+		case <-deadline:
+			t.Fatal("the hold never tried to follow the move")
+		default:
+		}
+
 		_ = fixture.controller.AdvanceHandshake("nm0", fixture.tunnel, fixture.clock.Now())
 		time.Sleep(5 * time.Millisecond)
 	}

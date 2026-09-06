@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -80,6 +81,18 @@ func (f *FakeController) PeerCount(name string) int {
 		return 0
 	}
 	return len(iface.Peers)
+}
+
+// Attempted reports whether a method has been called at least once.
+//
+// Reading Calls directly races the goroutine under test whenever the caller is
+// a background worker, so a test that polls for an attempt asks through here
+// instead of touching the slice.
+func (f *FakeController) Attempted(method string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Contains(f.Calls, method)
 }
 
 func (f *FakeController) record(method string) error {
