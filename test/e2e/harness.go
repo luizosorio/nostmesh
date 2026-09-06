@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/connectivity"
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/nostr"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/session"
@@ -54,6 +56,10 @@ type Harness struct {
 	Relays []*nostr.FakeRelay
 
 	clock func() time.Time
+
+	// log receives what the components under test emit. Never nil; a harness
+	// built without one discards.
+	log *slog.Logger
 }
 
 // HarnessOptions configures a Harness.
@@ -64,6 +70,10 @@ type HarnessOptions struct {
 
 	// Clock is injected so timing is deterministic.
 	Clock func() time.Time
+
+	// Logger captures what the run logged, so a test can assert on it.
+	// Optional: a run that does not care about output supplies nothing.
+	Logger *slog.Logger
 }
 
 // NewHarness builds a testbed.
@@ -84,7 +94,12 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 		}))
 	}
 
-	harness := &Harness{Relays: relays, clock: opts.Clock}
+	logger := opts.Logger
+	if logger == nil {
+		logger = observability.Discard()
+	}
+
+	harness := &Harness{Relays: relays, clock: opts.Clock, log: logger}
 
 	alice, err := harness.newNode("alice", "198.51.100.10:51820")
 	if err != nil {
@@ -378,6 +393,12 @@ func (h *Harness) verifyPath(ctx context.Context, target netip.AddrPort,
 	engine, err := connectivity.NewEngine(connectivity.EngineOptions{
 		SessionID: sessionID,
 		Clock:     h.clock,
+		Logger:    h.log,
+
+		// Deliberately left at the closed default. The point of running the
+		// scan against this path is to prove that a node logging normally does
+		// not write addresses; opening the gate here would prove the opposite
+		// of what the test is for.
 	})
 	if err != nil {
 		return netip.AddrPort{}, err
