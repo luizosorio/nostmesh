@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
@@ -65,6 +67,9 @@ type Manager struct {
 	journal    *JournalStore
 	clock      domain.Clock
 	inject     *InjectAfter
+
+	// log reports what was applied to the host. Never nil.
+	log *slog.Logger
 }
 
 // NewManager builds a manager.
@@ -72,7 +77,22 @@ func NewManager(controller wireguard.Controller, journal *JournalStore, clock do
 	if clock == nil {
 		clock = domain.SystemClock{}
 	}
-	return &Manager{controller: controller, journal: journal, clock: clock}
+	return &Manager{
+		controller: controller,
+		journal:    journal,
+		clock:      clock,
+		log:        observability.Discard(),
+	}
+}
+
+// WithLogger attaches a logger and returns the manager.
+//
+// A setter rather than a fourth constructor parameter: the logger is optional by
+// definition, and threading it through every call site would make four tests
+// state something they have nothing to say about.
+func (m *Manager) WithLogger(log *slog.Logger) *Manager {
+	m.log = observability.Component(log, observability.ComponentNetstate)
+	return m
 }
 
 // InjectFailureAfter makes the next Apply fail after the given operation.
@@ -159,14 +179,48 @@ func (m *Manager) Apply(ctx context.Context, plan Plan) (result *Transaction, er
 		return nil, err
 	}
 
+	m.log.Debug("network change planned",
+		observability.Event("journal.transaction.planned"),
+		slog.String("transaction", observability.Abbreviate(transaction.ID)),
+		slog.String("interface", plan.Interface.Name),
+		slog.Int("operations", len(plan.Operations)))
+
 	// Any failure past this point must leave the host as it was found.
 	defer func() {
 		if err == nil {
 			return
 		}
+
+		// Reported before the rollback runs, so a log that ends here — because
+		// the process died mid-compensation — still says what was being undone.
+		// That is the state reconciliation has to resolve at the next start.
+		m.log.Error("network change failed",
+			observability.Event("journal.transaction.failed"),
+			slog.String("transaction", observability.Abbreviate(transaction.ID)),
+			slog.String("interface", transaction.Interface),
+			observability.Result(observability.ResultFailed),
+			observability.Reason(observability.ReasonKernelRefused),
+			slog.String("error", err.Error()))
+
 		if rollbackErr := m.compensate(ctx, transaction); rollbackErr != nil {
 			err = fmt.Errorf("%w; rollback also failed: %w", err, rollbackErr)
+
+			// A rollback that fails is the worst outcome this package has: the
+			// host is left in a state nobody planned. It is the one condition
+			// here an operator has to act on personally.
+			m.log.Error("rollback did not complete",
+				observability.Event("journal.rollback.failed"),
+				slog.String("transaction", observability.Abbreviate(transaction.ID)),
+				observability.Result(observability.ResultFailed),
+				slog.String("error", rollbackErr.Error()))
+		} else {
+			m.log.Warn("network change rolled back",
+				observability.Event("journal.transaction.rolled_back"),
+				slog.String("transaction", observability.Abbreviate(transaction.ID)),
+				slog.String("interface", transaction.Interface),
+				observability.Reason(observability.ReasonRolledBack))
 		}
+
 		transaction.Close(m.clock.Now())
 		_ = m.save(transaction)
 	}()
@@ -182,6 +236,14 @@ func (m *Manager) Apply(ctx context.Context, plan Plan) (result *Transaction, er
 	if err = m.save(transaction); err != nil {
 		return nil, err
 	}
+
+	m.log.Info("network change applied",
+		observability.Event("journal.transaction.applied"),
+		slog.String("transaction", observability.Abbreviate(transaction.ID)),
+		slog.String("interface", transaction.Interface),
+		slog.Int("operations", len(transaction.Operations)),
+		observability.Result(observability.ResultOK))
+
 	return transaction, nil
 }
 

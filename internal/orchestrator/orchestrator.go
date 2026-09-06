@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 
 	"github.com/luizosorio/nostmesh/internal/config"
@@ -51,6 +52,9 @@ type Options struct {
 	Journal     *netstate.JournalStore
 	Clock       domain.Clock
 	GenerateKey func() (domain.WireGuardPublicKey, domain.WireGuardPrivateKey, error)
+
+	// Logger reports what was applied to the host. Optional.
+	Logger *slog.Logger
 }
 
 // New builds an Orchestrator.
@@ -69,7 +73,7 @@ func New(opts Options) (*Orchestrator, error) {
 
 	return &Orchestrator{
 		controller:  opts.Controller,
-		manager:     netstate.NewManager(opts.Controller, opts.Journal, clock),
+		manager:     netstate.NewManager(opts.Controller, opts.Journal, clock).WithLogger(opts.Logger),
 		journal:     opts.Journal,
 		clock:       clock,
 		generateKey: opts.GenerateKey,

@@ -70,7 +70,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 
 	clock := domain.SystemClock{}
 	journal := netstate.NewJournalStore(journalDir(cfg.Node.StateDir))
-	netManager := netstate.NewManager(adapter, journal, clock)
+	netManager := netstate.NewManager(adapter, journal, clock).WithLogger(log)
 
 	manager, err := orchestrator.NewSessionManager(orchestrator.SessionManagerOptions{
 		Controller:  adapter,

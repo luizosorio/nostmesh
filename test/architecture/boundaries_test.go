@@ -389,6 +389,63 @@ func TestNoPrivateKeyFieldsInWireTypes(t *testing.T) {
 	}
 }
 
+// TestLogEventsUseTheAttributeConstructor keeps the event vocabulary closed.
+//
+// Every log line is selected on by its event name, so the name has to be spelled
+// one way. A raw slog.String("event", ...) is how the same event ends up written
+// two ways in two places, and a filter that silently misses half of them.
+//
+// The constructor is also the chokepoint the redaction tests assert on: a call
+// site that bypasses it bypasses those guarantees too.
+func TestLogEventsUseTheAttributeConstructor(t *testing.T) {
+	root := repoRoot(t)
+
+	exempt := []string{
+		// Declares the constructor and the key it uses.
+		"internal/observability/attrs.go",
+		// Tests the handler itself, which means emitting records the way a
+		// handler receives them rather than the way a call site writes them.
+		"internal/observability/observability_test.go",
+		// This test necessarily names the pattern it looks for.
+		"test/architecture/boundaries_test.go",
+	}
+
+	const rawEventAttr = `slog.String("event"`
+
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		rel := relative(t, path)
+		if slices.Contains(exempt, rel) {
+			return nil
+		}
+
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+
+		if strings.Contains(string(content), rawEventAttr) {
+			t.Errorf(`%s builds an event attribute directly; use observability.Event so the vocabulary stays closed (see NM-22)`, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning repository: %v", err)
+	}
+}
+
 // importsInFile returns every import path in one file.
 func importsInFile(t *testing.T, path string) []string {
 	t.Helper()
