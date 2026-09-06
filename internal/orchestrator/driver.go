@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/connectivity"
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/session"
@@ -109,6 +111,9 @@ type Driver struct {
 	netstate   *netstate.Manager
 	controller wireguard.Controller
 	clock      domain.Clock
+
+	// log reports what the driver did. Never nil.
+	log *slog.Logger
 
 	identity  domain.NostrPublicKey
 	keys      keyGenerator
@@ -216,6 +221,10 @@ type DriverOptions struct {
 	OverlayAddrs  []netip.Prefix
 	MTU           int
 
+	// Diagnostic gates how much of an address reaches a log. It defaults to the
+	// closed setting, so a driver built without one discloses nothing extra.
+	Diagnostic observability.Diagnostic
+
 	// AllowedIPs is what this node will accept from the peer. Derived from
 	// local policy: a peer asking for a prefix does not grant it.
 	AllowedIPs []netip.Prefix
@@ -305,6 +314,10 @@ type DriverDeps struct {
 	Gatherer   *connectivity.Gatherer
 	Clock      domain.Clock
 
+	// Logger reports what the driver did. Optional: a driver built without one
+	// logs nothing rather than requiring every caller to supply a sink.
+	Logger *slog.Logger
+
 	// Answered records sessions this node has already responded to. A caller
 	// that builds a driver per attempt must supply the same record each time,
 	// or the responder forgets what it answered and repeats itself.
@@ -341,6 +354,9 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 	if deps.Clock == nil {
 		deps.Clock = domain.SystemClock{}
 	}
+	if deps.Logger == nil {
+		deps.Logger = observability.Discard()
+	}
 	if deps.Answered == nil {
 		// A driver used for a single attempt needs no shared record; one built
 		// per attempt by a peer worker does, and supplies it.
@@ -354,6 +370,7 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 		netstate:   deps.NetState,
 		controller: deps.Controller,
 		clock:      deps.Clock,
+		log:        observability.Component(deps.Logger, observability.ComponentSession),
 		identity:   deps.Identity,
 		keys:       deps.Keys,
 		transport:  deps.Transport,
@@ -380,6 +397,23 @@ const (
 	// will move first.
 	RoleAuto
 )
+
+// String names the role.
+//
+// Without it a log line would carry the integer, and a reader would have to know
+// the declaration order to tell an initiator from a responder — which is the
+// first thing they need when two nodes both think they are waiting.
+func (r Role) String() string {
+	switch r {
+	case RoleInitiator:
+		return "initiator"
+	case RoleResponder:
+		return "responder"
+	case RoleAuto:
+		return "auto"
+	}
+	return "unknown"
+}
 
 // ErrNoRequest reports a responder whose wait for a peer ended with none.
 //
@@ -421,6 +455,34 @@ func resolveRole(local, peer domain.NostrPublicKey, requested Role) Role {
 // handshake.
 func (d *Driver) Connect(ctx context.Context, peer domain.NostrPublicKey, role Role) (err error) {
 	role = resolveRole(d.identity, peer, role)
+	started := d.clock.Now()
+
+	d.log.Info("opening a session",
+		observability.Event("session.opening"),
+		observability.Peer(peer),
+		slog.String("role", role.String()))
+
+	// Reported at the end however it went, so a session that failed and one that
+	// came up are the same shape to read and the duration is comparable between
+	// them.
+	defer func() {
+		elapsed := d.clock.Now().Sub(started)
+		if err != nil {
+			d.log.Error("session failed",
+				observability.Event("session.failed"),
+				observability.Peer(peer),
+				observability.Result(observability.ResultFailed),
+				observability.Reason(classifyDriverFailure(err)),
+				observability.Duration(elapsed),
+				slog.String("error", err.Error()))
+			return
+		}
+		d.log.Info("session established",
+			observability.Event("session.established"),
+			observability.Peer(peer),
+			observability.Result(observability.ResultOK),
+			observability.Duration(elapsed))
+	}()
 
 	// Phase 0: authorize. Before a socket is opened, before a relay is told
 	// anything. An unauthorized peer must cost this node nothing and must not
@@ -1169,7 +1231,10 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 	ticker := time.NewTicker(d.options.HoldPollInterval)
 	defer ticker.Stop()
 
-	var failures int
+	var (
+		failures int
+		previous wireguard.PeerState
+	)
 	for {
 		select {
 		case <-ctx.Done():
@@ -1199,6 +1264,23 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 			return fmt.Errorf("%w: last handshake with %s was %s ago",
 				ErrSessionDropped, peerTunnel.Short(), age.Truncate(time.Second))
 		}
+
+		// Logged only when something moved.
+		//
+		// This loop polls for the life of the session, so a line per turn would
+		// be a line every few seconds forever — the transcript would bury the
+		// events worth reading. The previous state is already held for roam
+		// detection, so the comparison costs nothing.
+		if changed(previous, observed) {
+			d.log.Debug("peer observed",
+				observability.Event("peer.observed"),
+				observability.Peer(peer),
+				observability.TunnelKey(observed.PublicKey),
+				slog.Int64("rx_bytes", observed.ReceiveBytes),
+				slog.Int64("tx_bytes", observed.TransmitBytes),
+				slog.Int64("handshake_age_ms", d.clock.Now().Sub(observed.LastHandshake).Milliseconds()))
+		}
+		previous = observed
 
 		// Checked after staleness, never before: a session already dead is torn
 		// down rather than followed, since writing kernel state for a tunnel
@@ -1232,13 +1314,26 @@ func (d *Driver) followRoam(ctx context.Context, peer domain.NostrPublicKey, obs
 		return
 	}
 
-	// The error is deliberately dropped. Rejection by hysteresis is the ordinary
-	// case — the bound exists so a flapping path is not followed every poll —
-	// and a genuine failure is visible where an operator already looks: the
-	// recorded endpoint stays behind the kernel's, and the next poll retries.
-	// The driver has no logger of its own, and giving it one to report a
-	// condition that resolves itself would be the wrong trade.
-	_ = d.manager.RecordObservedEndpoint(ctx, peer, *observed.Endpoint, d.options.InterfaceName)
+	// Rejection by hysteresis is the ordinary case — the bound exists so a
+	// flapping path is not followed every poll — so it is a debug record rather
+	// than a warning, and the session carries on either way.
+	if err := d.manager.RecordObservedEndpoint(ctx, peer, *observed.Endpoint, d.options.InterfaceName); err != nil {
+		d.log.Debug("endpoint change not recorded",
+			observability.Event("endpoint.roam.rejected"),
+			observability.Peer(peer),
+			observability.Result(observability.ResultRefused),
+			observability.Reason(classifyDriverFailure(err)),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	// Re-read so the count reflects the move just recorded.
+	state, _ = d.manager.Get(peer)
+	d.log.Info("peer moved",
+		observability.Event("endpoint.roamed"),
+		observability.Peer(peer),
+		observability.Endpoint(*observed.Endpoint, d.options.Diagnostic),
+		slog.Int("roam_count", state.RoamCount))
 }
 
 // SessionID returns the conversation id for a peer's session, if there is one.

@@ -77,6 +77,18 @@ type Log struct {
 	// directory the service happened to start in, which is not a property
 	// anyone should have to reason about when looking for their logs.
 	File string `toml:"file" json:"file,omitempty"`
+
+	// Diagnostic is the explicit opt-in before addresses are written in full.
+	//
+	// One of: "off" (the default), "addresses". It is deliberately not a log
+	// level: raising verbosity to work out why a handshake stalls is routine,
+	// and consenting to write peer addresses to disk is not. Collapsing the two
+	// would make the second happen by accident every time somebody did the
+	// first.
+	//
+	// Only settable here, never by flag or environment variable. Editing a
+	// root-owned file is the friction that makes the choice deliberate.
+	Diagnostic string `toml:"diagnostic" json:"diagnostic,omitempty"`
 }
 
 // Policy carries local authorization settings.
