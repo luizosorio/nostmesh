@@ -87,6 +87,29 @@ service intends — phase, attempts, how long, the last failure, and the age of 
 data-plane handshake. `nostmesh status` reads the kernel instead, which is the
 right question when the two disagree.
 
+### Keeping a copy on disk
+
+Logs always reach the journal: the service writes to stderr and the unit captures
+it. Setting `log.file` adds a copy for an operator who wants one that outlives
+journald's retention, or who runs the binary without a supervisor at all.
+
+```json
+"log": { "level": "info", "format": "json", "file": "/var/log/nostmesh/nostmesh.log" }
+```
+
+Under the packaged unit the file must live in `/var/log/nostmesh`, which
+`LogsDirectory=` creates and `ProtectSystem=strict` makes the only writable place
+for it. It is written `0600`, and a path the service cannot open stops it from
+starting rather than leaving an audit trail that was never written.
+
+NostMesh does not rotate the file. Install `nostmesh.logrotate` as
+`/etc/logrotate.d/nostmesh`; it uses `copytruncate`, because the service holds
+the file open and a rename would leave it writing to a rotated copy nobody reads.
+
+`level` accepts `debug`, `info`, `warn` and `error`. At `info` an idle node is
+silent and each line is a state change worth reading. `debug` is verbose enough
+to follow a negotiation message by message, which is what it is for.
+
 ### What the unit assumes
 
 - **`CAP_NET_ADMIN` and nothing else.** Configuring an interface, its peers and

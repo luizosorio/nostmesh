@@ -45,6 +45,32 @@ func TestValidateAcceptsValidConfig(t *testing.T) {
 	}
 }
 
+// A log file outside the packaged directory is accepted.
+//
+// Under systemd only the granted logs directory is writable, but the binary is
+// self-contained and runs without a supervisor, where a laboratory run logging
+// to a temporary directory is ordinary. Refusing it here would make the
+// unpackaged case impossible in order to improve an error message for the
+// packaged one, which reports the path anyway when the file fails to open.
+func TestValidateAcceptsALogFileOutsideThePackagedDirectory(t *testing.T) {
+	cfg := validConfig()
+	cfg.Log.File = "/tmp/nostmesh-lab.log"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a log path outside the packaged directory was refused: %v", err)
+	}
+}
+
+// No log file at all is the default and stays valid.
+func TestValidateAcceptsNoLogFile(t *testing.T) {
+	cfg := validConfig()
+	cfg.Log.File = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a configuration without a log file was refused: %v", err)
+	}
+}
+
 func TestDefaultIsDenyByDefault(t *testing.T) {
 	cfg := Default()
 
@@ -92,6 +118,21 @@ func TestValidateRejects(t *testing.T) {
 			name:      "unknown log format",
 			mutate:    func(c *Config) { c.Log.Format = "xml" },
 			wantField: "log.format",
+		},
+		{
+			name:      "relative log file",
+			mutate:    func(c *Config) { c.Log.File = "logs/nostmesh.log" },
+			wantField: "log.file",
+		},
+		{
+			name:      "unclean log file",
+			mutate:    func(c *Config) { c.Log.File = "/var/log/nostmesh/../nostmesh.log" },
+			wantField: "log.file",
+		},
+		{
+			name:      "log file names a directory",
+			mutate:    func(c *Config) { c.Log.File = "/var/log/nostmesh/" },
+			wantField: "log.file",
 		},
 		{
 			name:      "allow by default",

@@ -66,6 +66,17 @@ type Log struct {
 	// Format is one of: json, text. JSON is the default because logs are meant
 	// to be machine-readable.
 	Format string `toml:"format" json:"format"`
+
+	// File is an optional second sink, in addition to the system log.
+	//
+	// Logs always reach the system log through the supervisor. This adds a copy
+	// on disk for an operator who wants one that outlives the journal's
+	// retention or who runs without a supervisor at all.
+	//
+	// It must be absolute: a relative path would resolve against whatever
+	// directory the service happened to start in, which is not a property
+	// anyone should have to reason about when looking for their logs.
+	File string `toml:"file" json:"file,omitempty"`
 }
 
 // Policy carries local authorization settings.

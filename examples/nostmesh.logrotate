@@ -1,0 +1,27 @@
+# Rotation for the optional log file, at /etc/logrotate.d/nostmesh.
+#
+# Only needed when log.file is set in the configuration. Logs reaching the
+# journal are rotated by journald's own retention and want nothing here.
+#
+# NostMesh does not rotate its own logs. Doing so would mean either a rotation
+# library — a dependency to audit for a problem the distribution already solves —
+# or reopening the file on a signal, and SIGHUP is already the allowlist reload:
+# overloading it would make a log rotation quietly re-read policy.
+
+/var/log/nostmesh/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+
+    # The service holds the file open for the life of the process, so the file
+    # must keep its inode. Renaming it would leave the service writing to a
+    # rotated file nobody reads until the next restart.
+    copytruncate
+
+    # The service writes 0600 and runs as its own user. Rotated copies inherit
+    # nothing automatically, so the mode is restated rather than assumed.
+    create 0600 nostmesh nostmesh
+}
