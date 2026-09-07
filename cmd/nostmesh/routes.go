@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/observability"
@@ -29,11 +30,32 @@ type routeHandler struct {
 	netstate *netstate.Manager
 	clock    func() time.Time
 
+	// advertise is what this node offers to reach. Empty means it offers
+	// nothing, which is the default.
+	advertise []netip.Prefix
+
+	// metric is this node's claim about its own cost to those prefixes.
+	metric uint32
+
+	// networkID names the network the advertised prefixes belong to.
+	networkID string
+
+	// validity is how long an announcement stands before a peer drops it.
+	//
+	// Short deliberately: reachability that depends on this node must not
+	// outlive its ability to say so, and the hold loop refreshes well inside
+	// the window.
+	validity time.Duration
+
 	// mu guards the router, which is not safe for concurrent use and is reached
 	// from every session's hold loop.
 	mu     sync.Mutex
 	router *policy.Router
 }
+
+// defaultAnnouncementValidity bounds how long a peer keeps a route after this
+// node stops refreshing it.
+const defaultAnnouncementValidity = 5 * time.Minute
 
 // newRouteHandler builds the handler over a router and a netstate manager.
 func newRouteHandler(
@@ -42,7 +64,24 @@ func newRouteHandler(
 	clock func() time.Time,
 	log *slog.Logger,
 ) *routeHandler {
-	return &routeHandler{log: log, netstate: manager, clock: clock, router: router}
+	return &routeHandler{
+		log:      log,
+		netstate: manager,
+		clock:    clock,
+		router:   router,
+		validity: defaultAnnouncementValidity,
+	}
+}
+
+// Advertising sets what this node offers to reach.
+//
+// Separate from construction because a node that routes nothing is the common
+// case, and a constructor taking parameters nobody fills in invites them being
+// filled in wrongly.
+func (h *routeHandler) Advertising(prefixes []netip.Prefix, metric uint32, networkID string) {
+	h.advertise = prefixes
+	h.metric = metric
+	h.networkID = networkID
 }
 
 // Announce records what a peer offered and reports what was decided.
@@ -109,10 +148,15 @@ func (h *routeHandler) Withdraw(
 	h.router.Withdraw(peer, prefixes)
 	h.mu.Unlock()
 
-	h.log.Info("routes withdrawn by peer",
-		observability.Event("route.withdrawn.by_peer"),
-		observability.Peer(peer),
-		slog.Int("prefixes", len(prefixes)))
+	// Each prefix by name, not a count. "prefixes: 2" tells an operator asking
+	// why a destination went away that something was withdrawn, which is the
+	// half of the answer they already had.
+	for _, prefix := range prefixes {
+		h.log.Info("route withdrawn by peer",
+			observability.Event("route.withdrawn.by_peer"),
+			observability.Peer(peer),
+			slog.String("prefix", prefix.String()))
+	}
 
 	// The kernel is not touched here. This runs from the hold loop, which calls
 	// Reconcile immediately afterwards with the interface name — and applying
@@ -142,6 +186,81 @@ func (h *routeHandler) Release(_ context.Context, peer domain.NostrPublicKey, _ 
 		observability.Peer(peer))
 	return nil
 }
+
+// Advertise returns what this node offers to reach.
+//
+// Built fresh each time rather than stored, because the validity has to be
+// relative to now: a cached announcement would carry a window that started
+// shrinking the moment it was made.
+//
+// nil when nothing is configured, which is the default. A node announces
+// nothing unless its operator said it can reach something.
+func (h *routeHandler) Advertise() *protocol.RouteAnnounce {
+	if len(h.advertise) == 0 {
+		return nil
+	}
+
+	routes := make([]protocol.AnnouncedRoute, 0, len(h.advertise))
+	for _, prefix := range h.advertise {
+		routes = append(routes, protocol.AnnouncedRoute{
+			Prefix: prefix.String(),
+			Metric: h.metric,
+		})
+	}
+
+	// Version from the clock rather than a counter: it must increase across a
+	// restart, and a counter starting at zero would be refused as stale by
+	// every peer that still held the previous announcement.
+	now := h.clock()
+
+	return &protocol.RouteAnnounce{
+		Routes:     routes,
+		NetworkID:  h.networkID,
+		Version:    uint64(now.UnixNano()),
+		ValidUntil: now.Add(h.validity).Unix(),
+	}
+}
+
+// buildRouteHandler assembles the node's routing from configuration.
+//
+// The local network it protects is filled in as sessions come and go, not here:
+// at startup this node has no transport addresses yet, and checking against an
+// empty list would admit a prefix that captures a path established a moment
+// later. See LocalNetwork.
+func buildRouteHandler(
+	cfg config.Config,
+	manager *netstate.Manager,
+	clock domain.Clock,
+	log *slog.Logger,
+) (*routeHandler, error) {
+	allowlist, err := loadAllowlist(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	advertise := make([]netip.Prefix, 0, len(cfg.Routes.Advertise))
+	for _, raw := range cfg.Routes.Advertise {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("routes.advertise %q: %w", raw, err)
+		}
+		advertise = append(advertise, prefix)
+	}
+
+	router := policy.NewRouter(allowlist, domain.NewRouteTable(routeHysteresis), domain.LocalNetwork{})
+	handler := newRouteHandler(router, manager, clock.Now, log)
+	handler.Advertising(advertise, cfg.Routes.Metric, cfg.Network.Manifest)
+
+	return handler, nil
+}
+
+// routeHysteresis is how long a selection stands before a rival can take it.
+//
+// Long enough that a burst of announcements does not rewrite the kernel
+// repeatedly, short enough that a genuinely better path is taken within a
+// minute. Mirrors the roaming interval's reasoning rather than its value: a
+// route change is cheaper than a tunnel move and can afford to be quicker.
+const routeHysteresis = 30 * time.Second
 
 // apply installs and removes what the router decided.
 //

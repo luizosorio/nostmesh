@@ -72,6 +72,7 @@ func (c Config) Validate() error {
 	errs = append(errs, c.Network.validate()...)
 	errs = append(errs, c.Policy.validate()...)
 	errs = append(errs, validatePeers(c.Peers)...)
+	errs = append(errs, c.Routes.validate()...)
 
 	if len(errs) == 0 {
 		return nil
@@ -331,6 +332,47 @@ func validateAuthorizedPeers(peers []AuthorizedPeer) Errors {
 				})
 			}
 		}
+	}
+
+	return errs
+}
+
+// validate checks what this node offers to announce.
+//
+// The refusals mirror what a receiver would apply anyway (NM-25), and catching
+// them here means an operator learns from `config validate` rather than from a
+// peer silently ignoring the announcement.
+func (r Routes) validate() Errors {
+	var errs Errors
+
+	seen := make(map[string]int, len(r.Advertise))
+
+	for i, raw := range r.Advertise {
+		field := fmt.Sprintf("routes.advertise[%d]", i)
+
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			errs = append(errs, Error{field,
+				fmt.Sprintf("must be a CIDR prefix such as 10.20.30.0/24, got %q", raw)})
+			continue
+		}
+		if prefix != prefix.Masked() {
+			errs = append(errs, Error{field, fmt.Sprintf(
+				"must be in canonical form; write %s rather than %s", prefix.Masked(), raw)})
+			continue
+		}
+		if prefix.Bits() == 0 {
+			errs = append(errs, Error{field, fmt.Sprintf(
+				"must not be a default route (%q); offering one captures every peer's traffic "+
+					"including the transport carrying it", raw)})
+			continue
+		}
+		if first, duplicate := seen[prefix.String()]; duplicate {
+			errs = append(errs, Error{field,
+				fmt.Sprintf("duplicates routes.advertise[%d]; one entry per destination", first)})
+			continue
+		}
+		seen[prefix.String()] = i
 	}
 
 	return errs

@@ -96,6 +96,12 @@ type RouteHandler interface {
 
 	// Release drops everything a peer offered, when its session ends.
 	Release(ctx context.Context, peer domain.NostrPublicKey, iface string) error
+
+	// Advertise returns what this node offers to reach, or nil if it offers
+	// nothing. Called on the hold loop so a refreshed announcement replaces one
+	// about to expire, which is what keeps a route alive without a peer having
+	// to ask.
+	Advertise() *protocol.RouteAnnounce
 }
 
 // Delivery is one control message and the conversation it belongs to.
@@ -860,6 +866,56 @@ func (d *Driver) drainRouteMessages(ctx context.Context, peer domain.NostrPublic
 	}
 }
 
+// advertiseRoutes republishes what this node offers, before the last one lapses.
+//
+// Refreshed rather than sent once: an announcement carries a validity, and a
+// peer drops the route when it passes. Sending only at establishment would make
+// every route disappear one validity later, on a tunnel that never stopped
+// working.
+//
+// The interval is a fraction of the validity so a single lost message does not
+// let the route lapse. A failure is logged and retried on the next tick.
+func (d *Driver) advertiseRoutes(ctx context.Context, peer domain.NostrPublicKey, last *time.Time) {
+	if d.routes == nil {
+		return
+	}
+
+	announce := d.routes.Advertise()
+	if announce == nil {
+		return
+	}
+
+	// The injected clock, never time.Until: the domain must not read the host
+	// clock directly, or a test cannot advance time without waiting for it.
+	validity := time.Unix(announce.ValidUntil, 0).Sub(d.clock.Now())
+	if validity <= 0 {
+		return
+	}
+	// Two refreshes inside one validity, so losing one message does not drop
+	// the route at the far end.
+	interval := validity / 2
+
+	if !last.IsZero() && d.clock.Now().Sub(*last) < interval {
+		return
+	}
+
+	if err := d.publisher.Publish(ctx, protocol.TypeRouteAnnounce, 0,
+		protocol.Payload{RouteAnnounce: announce}); err != nil {
+		d.log.Warn("an announcement was not published",
+			observability.Event("route.advertise.failed"),
+			observability.Peer(peer),
+			observability.Result(observability.ResultFailed),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	*last = d.clock.Now()
+	d.log.Debug("routes advertised",
+		observability.Event("route.advertised"),
+		observability.Peer(peer),
+		slog.Int("prefixes", len(announce.Routes)))
+}
+
 // reconcileRoutes applies expiry and selection.
 //
 // Every tick, not only when a message arrived: an offer lapses on its own
@@ -1342,8 +1398,9 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 	defer ticker.Stop()
 
 	var (
-		failures int
-		previous wireguard.PeerState
+		failures       int
+		previous       wireguard.PeerState
+		lastAdvertised time.Time
 	)
 	for {
 		select {
@@ -1403,6 +1460,7 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 		// about to end is work nobody wanted.
 		d.drainRouteMessages(ctx, peer)
 		d.reconcileRoutes(ctx, peer)
+		d.advertiseRoutes(ctx, peer, &lastAdvertised)
 
 		if onPoll != nil {
 			onPoll(observed)

@@ -243,3 +243,87 @@ func TestReleasingAPeerDropsItsRoutes(t *testing.T) {
 		t.Errorf("the table still claims %v after the peer was released", got)
 	}
 }
+
+// A node offering nothing announces nothing.
+//
+// The default. A node that advertised whatever it happened to reach would offer
+// its own LAN to strangers without its operator asking for it.
+func TestANodeOffersNothingByDefault(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 130), "10.20.30.0/24")
+
+	if announce := handler.Advertise(); announce != nil {
+		t.Errorf("a node with nothing configured announced %+v", announce)
+	}
+}
+
+// A configured node announces what it was told to offer.
+func TestAConfiguredNodeAnnouncesItsPrefixes(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 131), "10.20.30.0/24")
+	handler.Advertising([]netip.Prefix{
+		netip.MustParsePrefix("10.1.0.0/24"),
+		netip.MustParsePrefix("10.2.0.0/24"),
+	}, 20, "lab")
+
+	announce := handler.Advertise()
+	if announce == nil {
+		t.Fatal("a configured node announced nothing")
+	}
+	if len(announce.Routes) != 2 {
+		t.Fatalf("routes = %d, want both prefixes", len(announce.Routes))
+	}
+	if announce.NetworkID != "lab" {
+		t.Errorf("network = %q, want lab", announce.NetworkID)
+	}
+	if announce.Routes[0].Metric != 20 {
+		t.Errorf("metric = %d, want the configured claim", announce.Routes[0].Metric)
+	}
+	if announce.ValidUntil <= handler.clock().Unix() {
+		t.Error("the announcement is already expired when it is made")
+	}
+}
+
+// The announcement passes the protocol's own validation.
+//
+// Built here and checked by the code a receiver would run, so a shape this node
+// cannot express is caught before it reaches the wire rather than by a peer
+// silently refusing it.
+func TestAnAnnouncementIsValidOnTheWire(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 132), "10.20.30.0/24")
+	handler.Advertising([]netip.Prefix{netip.MustParsePrefix("10.1.0.0/24")}, 10, "lab")
+
+	announce := handler.Advertise()
+	if announce == nil {
+		t.Fatal("nothing was announced")
+	}
+
+	envelope := protocol.Envelope{Type: protocol.TypeRouteAnnounce}
+	if err := protocol.ValidatePayload(
+		protocol.Payload{RouteAnnounce: announce}, envelope, handler.clock(),
+	); err != nil {
+		t.Errorf("this node built an announcement a peer would refuse: %v", err)
+	}
+}
+
+// The version increases, so a peer never sees a refresh as stale.
+//
+// It comes from the clock rather than a counter because it has to survive a
+// restart: a counter starting at zero would be refused by every peer still
+// holding the previous announcement.
+func TestAnnouncementVersionsIncrease(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 133), "10.20.30.0/24")
+	handler.Advertising([]netip.Prefix{netip.MustParsePrefix("10.1.0.0/24")}, 10, "lab")
+
+	first := handler.Advertise()
+
+	later := routeClock()().Add(time.Minute)
+	handler.clock = func() time.Time { return later }
+	second := handler.Advertise()
+
+	if second.Version <= first.Version {
+		t.Errorf("version went from %d to %d; a refresh would be refused as stale",
+			first.Version, second.Version)
+	}
+	if second.ValidUntil <= first.ValidUntil {
+		t.Error("the refreshed announcement does not extend the validity")
+	}
+}

@@ -54,6 +54,13 @@ type supervisor struct {
 	// not answered twice.
 	answered *orchestrator.AnsweredSessions
 
+	// routes is the one routing table for this node.
+	//
+	// Shared like the session table, and for the same reason: a route is a
+	// property of this host rather than of one tunnel. Two peers can offer the
+	// same destination, and only a shared table can tell that they did.
+	routes *routeHandler
+
 	// mu guards the slot table and the attempt counter below.
 	mu sync.Mutex
 
@@ -117,6 +124,12 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		maxAttempting = defaultMaxSessions
 	}
 
+	routes, err := buildRouteHandler(cfg, netManager, clock, log)
+	if err != nil {
+		_ = closeController()
+		return nil, err
+	}
+
 	return &supervisor{
 		log:             log,
 		controller:      controller,
@@ -124,6 +137,7 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		manager:         manager,
 		netstate:        netManager,
 		answered:        orchestrator.NewAnsweredSessions(clock.Now),
+		routes:          routes,
 		slots:           make(map[domain.NostrPublicKey]peerSlot),
 		maxAttempting:   maxAttempting,
 		clock:           clock.Now,
