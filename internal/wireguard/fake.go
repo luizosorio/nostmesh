@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,12 +38,22 @@ type FakeController struct {
 	// Off by default: see HandshakeOnApply.
 	handshakeOnApply bool
 	handshakeAt      time.Time
+
+	// routes holds the routes installed per interface.
+	//
+	// Modelled separately from an interface's peers because that is how the
+	// kernel holds them: a route is an entry in a routing table pointing at a
+	// link, not a property of a peer. A fake that stored them on the peer would
+	// make withdrawing a route look like reconfiguring a peer, which is exactly
+	// the coupling NM-25 breaks.
+	routes map[string]map[netip.Prefix]bool
 }
 
 // NewFakeController returns an empty fake host.
 func NewFakeController() *FakeController {
 	return &FakeController{
 		interfaces:  make(map[string]*InterfaceState),
+		routes:      make(map[string]map[netip.Prefix]bool),
 		FailOn:      make(map[string]error),
 		failNext:    make(map[string]int),
 		failNextErr: make(map[string]error),
@@ -350,7 +361,83 @@ func (f *FakeController) RemoveInterface(_ context.Context, name string) error {
 	}
 
 	delete(f.interfaces, name)
+
+	// An interface taken away takes its routes with it, as the kernel does.
+	// Leaving them would let a test assert a route survives its own link.
+	delete(f.routes, name)
 	return nil
+}
+
+// AddRoute installs a route through an interface.
+func (f *FakeController) AddRoute(_ context.Context, name string, prefix netip.Prefix) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.record("AddRoute"); err != nil {
+		return err
+	}
+	if !OwnsInterface(name) {
+		return fmt.Errorf("%w: %s", ErrNotOwned, name)
+	}
+	if prefix.Bits() == 0 {
+		return fmt.Errorf("%w: refusing to install a default route (%s)", ErrNotOwned, prefix)
+	}
+
+	// The kernel refuses a route to a link that does not exist, and a fake that
+	// accepted one would let a test pass against an interface it never made.
+	if _, exists := f.interfaces[name]; !exists {
+		return fmt.Errorf("%w: %s", ErrInterfaceNotFound, name)
+	}
+
+	if f.routes[name] == nil {
+		f.routes[name] = make(map[netip.Prefix]bool)
+	}
+	// Idempotent, like RouteAdd tolerating EEXIST.
+	f.routes[name][prefix.Masked()] = true
+	return nil
+}
+
+// RemoveRoute deletes a route. Removing an absent route is not an error.
+func (f *FakeController) RemoveRoute(_ context.Context, name string, prefix netip.Prefix) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.record("RemoveRoute"); err != nil {
+		return err
+	}
+	if !OwnsInterface(name) {
+		return fmt.Errorf("%w: %s", ErrNotOwned, name)
+	}
+
+	delete(f.routes[name], prefix.Masked())
+	return nil
+}
+
+// HasRoute reports whether the route exists on the interface.
+func (f *FakeController) HasRoute(_ context.Context, name string, prefix netip.Prefix) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.record("HasRoute"); err != nil {
+		return false, err
+	}
+
+	return f.routes[name][prefix.Masked()], nil
+}
+
+// Routes reports what a test installed, so assertions do not reach inside.
+func (f *FakeController) Routes(name string) []netip.Prefix {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	installed := make([]netip.Prefix, 0, len(f.routes[name]))
+	for prefix := range f.routes[name] {
+		installed = append(installed, prefix)
+	}
+	slices.SortFunc(installed, func(a, b netip.Prefix) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return installed
 }
 
 var _ Controller = (*FakeController)(nil)

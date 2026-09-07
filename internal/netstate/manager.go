@@ -31,6 +31,26 @@ type Plan struct {
 
 	// Labels name peers as the operator configured them.
 	Labels []PeerLabel
+
+	// Routes are announced prefixes to install through the interface.
+	//
+	// Separate from the peers' own AllowedIPs, which ApplyPeer still installs:
+	// these arrived by announcement and are removed on withdrawal or expiry
+	// without touching the tunnel. See NM-25.
+	Routes []netip.Prefix
+}
+
+// touchesInterface reports whether the plan creates or configures the interface.
+//
+// False for a route-only plan, which acts on an interface a previous
+// transaction made and this one must not claim.
+func (p Plan) touchesInterface() bool {
+	for _, op := range p.Operations {
+		if op.Kind == OpCreateInterface {
+			return true
+		}
+	}
+	return false
 }
 
 // Describe renders the plan for a human, without key material.
@@ -225,10 +245,21 @@ func (m *Manager) Apply(ctx context.Context, plan Plan) (result *Transaction, er
 		_ = m.save(transaction)
 	}()
 
-	if err = m.applyInterface(ctx, transaction, plan); err != nil {
-		return nil, err
+	// A plan that names no interface operations is routing an interface that
+	// already exists. Running the interface steps anyway would look for
+	// operations nobody planned, and journaling them would claim this
+	// transaction created a link it merely used.
+	if plan.touchesInterface() {
+		if err = m.applyInterface(ctx, transaction, plan); err != nil {
+			return nil, err
+		}
 	}
 	if err = m.applyPeers(ctx, transaction, plan); err != nil {
+		return nil, err
+	}
+	// After the peers, so compensation — which runs in reverse — takes the
+	// routes out before the peers they point through.
+	if err = m.applyRoutes(ctx, transaction, plan); err != nil {
 		return nil, err
 	}
 
@@ -284,6 +315,96 @@ func (m *Manager) applyInterface(ctx context.Context, transaction *Transaction, 
 		}
 	}
 	return m.maybeInject(OpAddAddress)
+}
+
+// PlanRoutes describes installing announced routes on an existing interface.
+//
+// Separate from PlanInterface because routes outlive no interface and follow no
+// session: the RIB decides they should be present, and that decision changes on
+// its own schedule. The interface must already exist — a route to a link that is
+// not there is refused by the kernel, and planning one would journal an
+// operation that could never apply.
+//
+// Each route records whether it already existed, so compensation removes only
+// what this node installed. Asking is not optional: assuming would mean deleting
+// an operator's own route on rollback.
+func (m *Manager) PlanRoutes(ctx context.Context, transactionID, iface string, routes []netip.Prefix) (Plan, error) {
+	if _, err := m.controller.ObserveInterface(ctx, iface); err != nil {
+		return Plan{}, fmt.Errorf("observing %s before routing: %w", iface, err)
+	}
+
+	plan := Plan{
+		TransactionID: transactionID,
+		Interface:     wireguard.InterfaceSpec{Name: iface},
+		Routes:        make([]netip.Prefix, 0, len(routes)),
+	}
+
+	for _, prefix := range routes {
+		existed, err := m.controller.HasRoute(ctx, iface, prefix)
+		if err != nil {
+			return Plan{}, fmt.Errorf("checking route %s on %s: %w", prefix, iface, err)
+		}
+
+		plan.Routes = append(plan.Routes, prefix)
+		plan.Operations = append(plan.Operations, Operation{
+			ID:      NewOperationID(OpAddRoute, prefix.String()),
+			Kind:    OpAddRoute,
+			Target:  prefix.String(),
+			Detail:  fmt.Sprintf("route %s via %s", prefix, iface),
+			Existed: existed,
+		})
+	}
+
+	return plan, nil
+}
+
+// RemoveRoute withdraws one route, outside a transaction.
+//
+// Withdrawal is a single idempotent operation with nothing to roll back: if it
+// fails the route is still there, which is the state that was already true. A
+// transaction would add a journal entry describing an undo that cannot exist.
+func (m *Manager) RemoveRoute(ctx context.Context, iface string, prefix netip.Prefix) error {
+	if err := m.controller.RemoveRoute(ctx, iface, prefix); err != nil {
+		return fmt.Errorf("withdrawing route %s from %s: %w", prefix, iface, err)
+	}
+
+	m.log.Info("route withdrawn",
+		observability.Event("route.withdrawn"),
+		slog.String("interface", iface),
+		slog.String("prefix", prefix.String()))
+	return nil
+}
+
+func (m *Manager) applyRoutes(ctx context.Context, transaction *Transaction, plan Plan) error {
+	for _, prefix := range plan.Routes {
+		id := NewOperationID(OpAddRoute, prefix.String())
+
+		if err := m.begin(transaction, id); err != nil {
+			return err
+		}
+		if err := m.controller.AddRoute(ctx, plan.Interface.Name, prefix); err != nil {
+			_ = transaction.MarkFailed(id, err)
+			_ = m.save(transaction)
+			return fmt.Errorf("routing %s: %w", prefix, err)
+		}
+		if err := m.complete(transaction, id); err != nil {
+			return err
+		}
+
+		// Named individually rather than counted with the rest of the
+		// transaction. "operations: 2" answers nothing for an operator asking
+		// why a prefix is not routed, and the prefix is the whole question.
+		m.log.Info("route installed",
+			observability.Event("route.installed"),
+			slog.String("interface", plan.Interface.Name),
+			slog.String("prefix", prefix.String()),
+			observability.Result(observability.ResultOK))
+
+		if err := m.maybeInject(OpAddRoute); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) applyPeers(ctx context.Context, transaction *Transaction, plan Plan) error {
@@ -368,6 +489,13 @@ func (m *Manager) undo(ctx context.Context, iface string, op Operation) error {
 		// Removing the interface takes its addresses and peers with it, which
 		// is why it compensates last.
 		return m.controller.RemoveInterface(ctx, iface)
+
+	case OpAddRoute:
+		prefix, err := netip.ParsePrefix(op.Target)
+		if err != nil {
+			return fmt.Errorf("parsing route from journal: %w", err)
+		}
+		return m.controller.RemoveRoute(ctx, iface, prefix)
 
 	case OpConfigureInterface, OpSetLinkUp, OpAddAddress:
 		// Subsumed by removing the interface.

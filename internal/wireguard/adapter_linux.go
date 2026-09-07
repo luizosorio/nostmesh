@@ -249,23 +249,129 @@ func (a *LinuxAdapter) ensurePeerRoutes(iface string, allowed []netip.Prefix) er
 			return fmt.Errorf("%w: refusing to install a default route (%s) for a peer", ErrNotOwned, prefix)
 		}
 
-		destination := &net.IPNet{
-			IP:   net.IP(prefix.Masked().Addr().AsSlice()),
-			Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
-		}
-
-		route := &netlink.Route{
-			LinkIndex: link.Attrs().Index,
-			Dst:       destination,
-			Scope:     netlink.SCOPE_LINK,
-		}
-
 		// Idempotent: an identical route already present is not an error.
-		if err := netlink.RouteAdd(route); err != nil && !errors.Is(err, unix.EEXIST) {
+		if err := netlink.RouteAdd(routeFor(link, prefix)); err != nil && !errors.Is(err, unix.EEXIST) {
 			return fmt.Errorf("routing %s via %s: %w", prefix, iface, err)
 		}
 	}
 	return nil
+}
+
+// routeFor builds the route entry for a prefix on an interface.
+//
+// SCOPE_LINK on the interface with no gateway, per NM-09: a WireGuard interface
+// is point-to-multipoint with no link-layer next hop, so there is no gateway
+// address to name.
+func routeFor(link netlink.Link, prefix netip.Prefix) *netlink.Route {
+	return &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst: &net.IPNet{
+			IP:   net.IP(prefix.Masked().Addr().AsSlice()),
+			Mask: net.CIDRMask(prefix.Bits(), prefix.Addr().BitLen()),
+		},
+		Scope: netlink.SCOPE_LINK,
+	}
+}
+
+// AddRoute installs a route to a prefix through an interface.
+//
+// The default route is refused here as it is for a peer. NM-25 lets policy
+// decide that an operator is willing to be asked about one, but this adapter is
+// not where the asking happens, and a route that captures the tunnel's own
+// transport is a loop whatever decided it.
+func (a *LinuxAdapter) AddRoute(ctx context.Context, iface string, prefix netip.Prefix) error {
+	if !OwnsInterface(iface) {
+		return fmt.Errorf("%w: %s", ErrNotOwned, iface)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if prefix.Bits() == 0 {
+		return fmt.Errorf("%w: refusing to install a default route (%s)", ErrNotOwned, prefix)
+	}
+
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return fmt.Errorf("looking up %s for routing: %w", iface, err)
+	}
+
+	if err := netlink.RouteAdd(routeFor(link, prefix)); err != nil && !errors.Is(err, unix.EEXIST) {
+		return fmt.Errorf("routing %s via %s: %w", prefix, iface, err)
+	}
+	return nil
+}
+
+// RemoveRoute deletes a route. Removing an absent route is not an error, so
+// compensation can run without checking first.
+func (a *LinuxAdapter) RemoveRoute(ctx context.Context, iface string, prefix netip.Prefix) error {
+	if !OwnsInterface(iface) {
+		return fmt.Errorf("%w: %s", ErrNotOwned, iface)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		// An interface already gone took its routes with it, which is the state
+		// wanted. Reporting an error here would make teardown order matter.
+		if errors.As(err, &netlink.LinkNotFoundError{}) {
+			return nil
+		}
+		return fmt.Errorf("looking up %s for routing: %w", iface, err)
+	}
+
+	err = netlink.RouteDel(routeFor(link, prefix))
+	if err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("removing route %s via %s: %w", prefix, iface, err)
+	}
+	return nil
+}
+
+// HasRoute reports whether the route already exists on the interface.
+//
+// Asked before installing, so the journal records whether this node created the
+// route. Without it, compensation would remove a route the operator installed
+// themselves — the journal's whole discipline is never to undo what it did not
+// do.
+func (a *LinuxAdapter) HasRoute(ctx context.Context, iface string, prefix netip.Prefix) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		if errors.As(err, &netlink.LinkNotFoundError{}) {
+			return false, nil
+		}
+		return false, fmt.Errorf("looking up %s for routing: %w", iface, err)
+	}
+
+	family := netlink.FAMILY_V4
+	if prefix.Addr().Is6() {
+		family = netlink.FAMILY_V6
+	}
+
+	routes, err := netlink.RouteList(link, family)
+	if err != nil {
+		return false, fmt.Errorf("listing routes on %s: %w", iface, err)
+	}
+
+	wanted := prefix.Masked()
+	for _, route := range routes {
+		if route.Dst == nil {
+			continue
+		}
+		found, ok := netip.AddrFromSlice(route.Dst.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := route.Dst.Mask.Size()
+		if netip.PrefixFrom(found.Unmap(), ones) == wanted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RemovePeer removes a peer. Removing an absent peer is not an error, so
