@@ -86,30 +86,45 @@ func New(opts Options) (*Orchestrator, error) {
 // not have is exactly the situation an operator needs to see, and it is what
 // distinguishes "configured" from "working".
 type Status struct {
-	Interface     string
+	// Interfaces is what this project owns on the host, one per session.
+	//
+	// A list rather than a name: a node running several sessions carries several
+	// interfaces, and reporting a single expected name would say "down" while
+	// tunnels were carrying traffic — which is worse than saying nothing.
+	Interfaces []wireguard.InterfaceState
+
 	Configured    []config.Peer
-	Observed      *wireguard.InterfaceState
 	Pending       []*netstate.Transaction
-	InterfaceUp   bool
 	ObserveFailed error
 }
 
+// InterfaceUp reports whether any tunnel interface exists.
+func (s Status) InterfaceUp() bool { return len(s.Interfaces) > 0 }
+
 // Status collects the current state.
 func (o *Orchestrator) Status(ctx context.Context, cfg config.Config) (Status, error) {
-	status := Status{
-		Interface:  defaultInterface,
-		Configured: cfg.Peers,
+	status := Status{Configured: cfg.Peers}
+
+	// Enumerated, not named. A node with several sessions carries several
+	// interfaces, and asking about one expected name is how this command came to
+	// report "down" while two tunnels were carrying traffic.
+	owned, err := o.controller.ListOwnedInterfaces(ctx)
+	if err != nil {
+		status.ObserveFailed = err
+		owned = nil
 	}
 
-	observed, err := o.controller.ObserveInterface(ctx, defaultInterface)
-	switch {
-	case err == nil:
-		status.Observed = &observed
-		status.InterfaceUp = true
-	case errors.Is(err, wireguard.ErrInterfaceNotFound):
-		// Not an error: the tunnel is simply down.
-	default:
-		status.ObserveFailed = err
+	for _, name := range owned {
+		observed, err := o.controller.ObserveInterface(ctx, name)
+		switch {
+		case err == nil:
+			status.Interfaces = append(status.Interfaces, observed)
+		case errors.Is(err, wireguard.ErrInterfaceNotFound):
+			// It went away between the listing and the question, which is not
+			// an error: the answer is that it is not there.
+		default:
+			status.ObserveFailed = err
+		}
 	}
 
 	pending, err := o.journal.PendingRecovery()

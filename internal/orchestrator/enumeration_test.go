@@ -187,3 +187,55 @@ func TestAFailedListingStopsReconciliation(t *testing.T) {
 		t.Error("Down reported success when it could not list what to remove")
 	}
 }
+
+// Status reports every interface, not one expected name.
+//
+// This is a defect a field test found rather than a hypothetical: with sessions
+// on nm-4483ad63 and nm-7de82806 carrying traffic, `nostmesh status` reported
+// `state: down` and `configured peers: 0`, because it asked about nm0. A command
+// that says down while a tunnel is carrying is worse than no command.
+func TestStatusReportsEveryOwnedInterface(t *testing.T) {
+	orchestrator, controller, _ := newTestOrchestrator(t)
+
+	for _, name := range []string{"nm-a1b2c3d4", "nm-e5f6a7b8"} {
+		seedInterface(t, controller, name)
+	}
+
+	status, err := orchestrator.Status(context.Background(), testConfig())
+	if err != nil {
+		t.Fatalf("reading status: %v", err)
+	}
+
+	if !status.InterfaceUp() {
+		t.Error("status reported down with two interfaces present")
+	}
+	if len(status.Interfaces) != 2 {
+		t.Fatalf("status reported %d interfaces, want 2", len(status.Interfaces))
+	}
+
+	for _, want := range []string{"nm-a1b2c3d4", "nm-e5f6a7b8"} {
+		var found bool
+		for _, observed := range status.Interfaces {
+			if observed.Name == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("status did not report %s", want)
+		}
+	}
+}
+
+// With nothing up, status reports down rather than failing.
+func TestStatusWithNothingUp(t *testing.T) {
+	orchestrator, _, _ := newTestOrchestrator(t)
+
+	status, err := orchestrator.Status(context.Background(), testConfig())
+	if err != nil {
+		t.Fatalf("reading status: %v", err)
+	}
+
+	if status.InterfaceUp() {
+		t.Error("status reported up with no interfaces present")
+	}
+}

@@ -139,13 +139,13 @@ func TestStatusDistinguishesDesiredFromObserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading status: %v", err)
 	}
-	if before.InterfaceUp {
+	if before.InterfaceUp() {
 		t.Error("the interface must not be reported up before Up runs")
 	}
 	if len(before.Configured) != 1 {
 		t.Errorf("configured peers = %d, want 1", len(before.Configured))
 	}
-	if before.Observed != nil {
+	if len(before.Interfaces) != 0 {
 		t.Error("nothing should be observed before Up runs")
 	}
 
@@ -157,14 +157,14 @@ func TestStatusDistinguishesDesiredFromObserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading status: %v", err)
 	}
-	if !after.InterfaceUp {
+	if !after.InterfaceUp() {
 		t.Error("the interface must be reported up after Up")
 	}
-	if after.Observed == nil {
-		t.Fatal("observed state must be present after Up")
+	if len(after.Interfaces) != 1 {
+		t.Fatalf("observed interfaces = %d, want 1", len(after.Interfaces))
 	}
-	if len(after.Observed.Peers) != 1 {
-		t.Errorf("observed peers = %d, want 1", len(after.Observed.Peers))
+	if len(after.Interfaces[0].Peers) != 1 {
+		t.Errorf("observed peers = %d, want 1", len(after.Interfaces[0].Peers))
 	}
 }
 
