@@ -164,9 +164,13 @@ docker-cover-all:
 		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make cover-all'
 	@$(MAKE) --no-print-directory fix-ownership
 
+# --privileged rather than two capabilities: the subnet tests write
+# net.ipv4.ip_forward inside their own namespace, and Docker mounts /proc/sys
+# read-only unless the container is privileged. Without it those tests skip,
+# and a skipping test proves nothing.
 .PHONY: docker-test-privileged
 docker-test-privileged:
-	docker run --rm --cap-add NET_ADMIN --cap-add SYS_ADMIN -v "$(PWD)":/src -w /src \
+	docker run --rm --privileged -v "$(PWD)":/src -w /src \
 		-e GOFLAGS=-buildvcs=false \
 		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make test-privileged'
 
