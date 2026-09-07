@@ -51,3 +51,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-22](NM-22-logging-and-diagnostics.md) | Logging and diagnostics | Accepted |
 | [NM-23](NM-23-pinning-external-versions.md) | Pinning external versions | Accepted |
 | [NM-24](NM-24-policy-decisions-carry-limits.md) | Policy decisions carry limits | Accepted |
+| [NM-25](NM-25-route-announcements.md) | Route announcements are proposals, and routes are their own operation | Accepted |

@@ -95,6 +95,20 @@ const (
 
 	// TypeSessionError reports a sanitized error with a stable code.
 	TypeSessionError MessageType = "session.error"
+
+	// TypeRouteAnnounce offers a prefix the sender says it can reach.
+	//
+	// An offer, never an instruction. The receiver validates it, asks local
+	// policy, resolves conflicts and selects — and may install nothing. See
+	// NM-25.
+	TypeRouteAnnounce MessageType = "route.announce"
+
+	// TypeRouteWithdraw retracts a prefix the sender announced.
+	//
+	// Distinct from an expiry, which needs no message: a withdrawal is the
+	// provider saying it stopped reaching the prefix before its validity ran
+	// out, which is the case where waiting would black-hole traffic.
+	TypeRouteWithdraw MessageType = "route.withdraw"
 )
 
 // knownTypes is the closed set this version accepts.
@@ -107,6 +121,8 @@ var knownTypes = map[MessageType]bool{
 	TypeSessionKeepalive: true,
 	TypeSessionClose:     true,
 	TypeSessionError:     true,
+	TypeRouteAnnounce:    true,
+	TypeRouteWithdraw:    true,
 }
 
 // IsKnown reports whether this version understands the type.
