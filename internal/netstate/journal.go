@@ -32,6 +32,14 @@ const (
 
 	// OpApplyPeer configures a peer.
 	OpApplyPeer OperationKind = "apply_peer"
+
+	// OpAddRoute installs a route to an announced prefix.
+	//
+	// Its own operation rather than part of applying a peer, because an
+	// announced route appears and disappears independently of the tunnel
+	// carrying it: withdrawing one must not rewrite the peer. The routes a peer
+	// implies still ride with OpApplyPeer, where NM-09 put them. See NM-25.
+	OpAddRoute OperationKind = "add_route"
 )
 
 // OperationStatus is where an operation stands.

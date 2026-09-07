@@ -144,4 +144,25 @@ type Controller interface {
 	// Only interfaces matching InterfacePrefix are returned. Something else on
 	// the host is not ours to enumerate, let alone remove.
 	ListOwnedInterfaces(ctx context.Context) ([]string, error)
+
+	// AddRoute installs a route to a prefix through an interface.
+	//
+	// Separate from ApplyPeer because an announced route appears and disappears
+	// independently of the tunnel carrying it (NM-25). The routes a peer implies
+	// still ride with ApplyPeer, where NM-09 put them.
+	//
+	// Idempotent: a route already present is not an error.
+	AddRoute(ctx context.Context, iface string, prefix netip.Prefix) error
+
+	// RemoveRoute deletes a route. Removing an absent route is not an error.
+	RemoveRoute(ctx context.Context, iface string, prefix netip.Prefix) error
+
+	// HasRoute reports whether a route to the prefix already exists on the
+	// interface.
+	//
+	// Compensation needs it. The journal records whether an operation created
+	// something so that rollback does not remove what was already there, and
+	// without this a rollback would delete a route the operator installed
+	// themselves.
+	HasRoute(ctx context.Context, iface string, prefix netip.Prefix) (bool, error)
 }

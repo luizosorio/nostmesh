@@ -325,3 +325,135 @@ func TestNamespaceIsolationLeavesNoResidue(t *testing.T) {
 		t.Error("an interface created inside a namespace leaked into the host")
 	}
 }
+
+// A route installed through the adapter reaches the kernel and comes back.
+//
+// The fake models routes, and a fake validates the implementation against
+// itself. This is the confrontation with the real thing: netlink installs it,
+// netlink reports it, and netlink takes it away.
+func TestAdapterInstallsAndRemovesARoute(t *testing.T) {
+	requirePrivileges(t)
+
+	withNamespace(t, func() {
+		adapter, closeAdapter, err := wireguard.NewController()
+		if err != nil {
+			t.Fatalf("opening the controller: %v", err)
+		}
+		defer func() { _ = closeAdapter() }()
+
+		ctx := context.Background()
+		spec := testSpec(t, "nm-route")
+		if _, err := adapter.EnsureInterface(ctx, spec); err != nil {
+			t.Fatalf("creating the interface: %v", err)
+		}
+
+		prefix := netip.MustParsePrefix("10.77.0.0/16")
+
+		// Before installing, the kernel does not have it. Asserted rather than
+		// assumed: a HasRoute that always answered true would pass every other
+		// check here.
+		if had, err := adapter.HasRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("checking for the route: %v", err)
+		} else if had {
+			t.Fatal("the kernel reported a route nobody installed")
+		}
+
+		if err := adapter.AddRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("installing the route: %v", err)
+		}
+
+		if had, err := adapter.HasRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("checking for the route: %v", err)
+		} else if !had {
+			t.Error("the route was installed but the kernel does not report it")
+		}
+
+		// Idempotent, as the port promises.
+		if err := adapter.AddRoute(ctx, "nm-route", prefix); err != nil {
+			t.Errorf("installing the same route twice: %v", err)
+		}
+
+		if err := adapter.RemoveRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("removing the route: %v", err)
+		}
+		if had, err := adapter.HasRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("checking for the route: %v", err)
+		} else if had {
+			t.Error("the route is still in the kernel after removal")
+		}
+
+		// Removing an absent route succeeds, so compensation need not check.
+		if err := adapter.RemoveRoute(ctx, "nm-route", prefix); err != nil {
+			t.Errorf("removing an absent route: %v", err)
+		}
+	})
+}
+
+// The kernel takes an interface's routes with the interface.
+//
+// The behaviour the fake claims. Confronting it here is what makes the fake's
+// version evidence rather than an assumption.
+func TestRemovingAnInterfaceTakesItsRoutesInTheKernel(t *testing.T) {
+	requirePrivileges(t)
+
+	withNamespace(t, func() {
+		adapter, closeAdapter, err := wireguard.NewController()
+		if err != nil {
+			t.Fatalf("opening the controller: %v", err)
+		}
+		defer func() { _ = closeAdapter() }()
+
+		ctx := context.Background()
+		if _, err := adapter.EnsureInterface(ctx, testSpec(t, "nm-route")); err != nil {
+			t.Fatalf("creating the interface: %v", err)
+		}
+
+		prefix := netip.MustParsePrefix("10.78.0.0/16")
+		if err := adapter.AddRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("installing the route: %v", err)
+		}
+
+		before := countRoutes(t)
+		if err := adapter.RemoveInterface(ctx, "nm-route"); err != nil {
+			t.Fatalf("removing the interface: %v", err)
+		}
+
+		if after := countRoutes(t); after >= before {
+			t.Errorf("routes = %d before and %d after; removing a link must take its routes", before, after)
+		}
+		if had, err := adapter.HasRoute(ctx, "nm-route", prefix); err != nil {
+			t.Fatalf("checking for the route: %v", err)
+		} else if had {
+			t.Error("a route survived the interface it pointed through")
+		}
+	})
+}
+
+// The adapter refuses to install a default route.
+//
+// NM-09's rule, and NM-25 leaves it in force here: policy may decide an operator
+// is willing to be asked, but this is not where the asking happens, and a route
+// capturing the tunnel's transport is a loop whatever decided it.
+func TestAdapterRefusesADefaultRoute(t *testing.T) {
+	requirePrivileges(t)
+
+	withNamespace(t, func() {
+		adapter, closeAdapter, err := wireguard.NewController()
+		if err != nil {
+			t.Fatalf("opening the controller: %v", err)
+		}
+		defer func() { _ = closeAdapter() }()
+
+		ctx := context.Background()
+		if _, err := adapter.EnsureInterface(ctx, testSpec(t, "nm-route")); err != nil {
+			t.Fatalf("creating the interface: %v", err)
+		}
+
+		for _, route := range []string{"0.0.0.0/0", "::/0"} {
+			err := adapter.AddRoute(ctx, "nm-route", netip.MustParsePrefix(route))
+			if err == nil {
+				t.Errorf("%s was installed; a default route captures the tunnel's own transport", route)
+			}
+		}
+	})
+}
