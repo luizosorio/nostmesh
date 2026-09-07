@@ -12,7 +12,18 @@
   "policy": {
     "default_action": "deny",
     "accept_default_route": false,
-    "max_sessions": 64
+    "max_sessions": 64,
+
+    "groups": [
+      {
+        "name": "my-devices",
+        "members": [
+          "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+        ],
+        "actions": ["session"],
+        "allowed_ips": ["100.96.0.0/24"]
+      }
+    ]
   },
 
   "peers": [

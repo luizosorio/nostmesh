@@ -40,6 +40,36 @@ here — that is a transit service with explicit consent, arriving in MVP 4.
 See the [manual tunnel tutorial](../docs/tutorial-manual-tunnel.md) for a full
 walk-through.
 
+## Authorizing several identities at once
+
+`policy.groups` authorizes every identity it names with one rule. It exists for
+the case where a set of peers is trusted the same way — a person's own devices,
+most obviously — and writing the tenth rule adds no intent the first did not
+already carry.
+
+```json
+"groups": [
+  {
+    "name": "my-devices",
+    "members": ["<hex Nostr public key>", "..."],
+    "actions": ["session"],
+    "allowed_ips": ["100.96.0.0/24"]
+  }
+]
+```
+
+**This does not relax the default.** A peer no rule names is still refused, and a
+group is a shorter way to say who is trusted rather than a way to skip saying it.
+A rule written for one peer by name wins over a group in both directions, so
+revoking a peer individually holds even when a group would allow it.
+
+The member key in `nostmesh.json` is synthetic, like the peer public key above.
+
+Members are listed in the file today. [NM-24](../docs/adr/NM-24-policy-decisions-carry-limits.md)
+describes a group as the membership of a signed network manifest, so that adding
+a device to the manifest extends a rule already written; that arrives with the
+manifest itself.
+
 ## Running as a service
 
 `nostmesh.service` is a systemd unit for `nostmesh serve`, the long-running form

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -311,7 +313,82 @@ func loadAllowlist(cfg config.Config) (*policy.Allowlist, error) {
 		}
 	}
 
+	// Groups are added after the per-peer grants, but the order decides nothing:
+	// the preference for a named peer lives in Decide, not here. See NM-24.
+	for _, configured := range cfg.Policy.Groups {
+		members := make([]domain.NostrPublicKey, 0, len(configured.Members))
+		for _, raw := range configured.Members {
+			member, err := domain.ParseNostrPublicKey(raw)
+			if err != nil {
+				return nil, fmt.Errorf("policy group %q: %w", configured.Name, err)
+			}
+			members = append(members, member)
+		}
+
+		actions := make([]policy.Action, 0, len(configured.Actions))
+		for _, action := range configured.Actions {
+			actions = append(actions, policy.Action(action))
+		}
+
+		allowedIPs := make([]netip.Prefix, 0, len(configured.AllowedIPs))
+		for _, raw := range configured.AllowedIPs {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, fmt.Errorf("policy group %q allowed_ips: %w", configured.Name, err)
+			}
+			allowedIPs = append(allowedIPs, prefix)
+		}
+
+		if err := allowlist.AddGroup(policy.Group{
+			Name:       configured.Name,
+			Members:    members,
+			Actions:    actions,
+			AllowedIPs: allowedIPs,
+		}); err != nil {
+			return nil, fmt.Errorf("policy group %q: %w", configured.Name, err)
+		}
+	}
+
 	return allowlist, nil
+}
+
+// sessionPeers reports every identity policy would hold a session with.
+//
+// The service starts one worker per entry, so this has to include group members
+// and not only peers named individually: a rule covering ten devices authorizes
+// ten peers, and listing the grants alone would authorize them while connecting
+// to none.
+//
+// Membership is asked of the decision rather than read off the rules, so a
+// revoked peer a group happens to name stays out — the precedence lives in one
+// place (NM-24), and duplicating it here is how the two would drift apart.
+//
+// The result is sorted. It decides which workers run, and an order that varied
+// between reloads would restart tunnels that nothing asked to change.
+func sessionPeers(allowlist *policy.Allowlist) []domain.NostrPublicKey {
+	seen := make(map[domain.NostrPublicKey]struct{})
+
+	for _, grant := range allowlist.Grants() {
+		seen[grant.Peer] = struct{}{}
+	}
+	for _, group := range allowlist.Groups() {
+		for _, member := range group.Members {
+			seen[member] = struct{}{}
+		}
+	}
+
+	peers := make([]domain.NostrPublicKey, 0, len(seen))
+	for peer := range seen {
+		if !allowlist.Decide(peer, policy.ActionSession).Allowed() {
+			continue
+		}
+		peers = append(peers, peer)
+	}
+
+	slices.SortFunc(peers, func(a, b domain.NostrPublicKey) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	return peers
 }
 
 func joinActions(actions []policy.Action) string {

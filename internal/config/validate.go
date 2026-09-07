@@ -280,6 +280,7 @@ func (p Policy) validate() Errors {
 	}
 
 	errs = append(errs, validateAuthorizedPeers(p.AuthorizedPeers)...)
+	errs = append(errs, validatePolicyGroups(p.Groups)...)
 
 	switch {
 	case p.MaxSessions <= 0:
@@ -327,6 +328,78 @@ func validateAuthorizedPeers(peers []AuthorizedPeer) Errors {
 				errs = append(errs, Error{
 					fmt.Sprintf("%s[%d]", field("actions"), j),
 					fmt.Sprintf("must be one of %s, got %q", strings.Join(knownActions, ", "), action),
+				})
+			}
+		}
+	}
+
+	return errs
+}
+
+// validatePolicyGroups checks group rules.
+//
+// Prefixes are checked here, unlike the ones on an authorized peer, which are
+// parsed only when the grant is built. A malformed prefix that reaches that
+// point makes a whole reload fail, and the operator learns about it from the
+// refusal rather than from the field that is wrong.
+func validatePolicyGroups(groups []PolicyGroup) Errors {
+	var errs Errors
+
+	seenNames := make(map[string]int, len(groups))
+
+	for i, group := range groups {
+		field := func(name string) string {
+			return fmt.Sprintf("policy.groups[%d].%s", i, name)
+		}
+
+		if group.Name == "" {
+			errs = append(errs, Error{field("name"),
+				"must not be empty; a group is named so a decision can say which rule produced it"})
+		} else if first, duplicate := seenNames[group.Name]; duplicate {
+			errs = append(errs, Error{field("name"),
+				fmt.Sprintf("duplicates policy.groups[%d]; one rule per group name", first)})
+		} else {
+			seenNames[group.Name] = i
+		}
+
+		if len(group.Members) == 0 {
+			errs = append(errs, Error{field("members"),
+				"must list at least one member; an empty group authorizes nobody and is probably a mistake"})
+		}
+
+		seenMembers := make(map[string]int, len(group.Members))
+		for j, member := range group.Members {
+			memberField := fmt.Sprintf("%s[%d]", field("members"), j)
+			if err := validateNostrKey(member, memberField); err != nil {
+				errs = append(errs, *err)
+				continue
+			}
+			if first, duplicate := seenMembers[member]; duplicate {
+				errs = append(errs, Error{memberField,
+					fmt.Sprintf("duplicates member %d; listing an identity twice grants it nothing more", first)})
+				continue
+			}
+			seenMembers[member] = j
+		}
+
+		if len(group.Actions) == 0 {
+			errs = append(errs, Error{field("actions"),
+				"must list at least one action; an empty list authorizes nothing and is probably a mistake"})
+		}
+		for j, action := range group.Actions {
+			if !slices.Contains(knownActions, action) {
+				errs = append(errs, Error{
+					fmt.Sprintf("%s[%d]", field("actions"), j),
+					fmt.Sprintf("must be one of %s, got %q", strings.Join(knownActions, ", "), action),
+				})
+			}
+		}
+
+		for j, raw := range group.AllowedIPs {
+			if _, err := netip.ParsePrefix(raw); err != nil {
+				errs = append(errs, Error{
+					fmt.Sprintf("%s[%d]", field("allowed_ips"), j),
+					fmt.Sprintf("must be a CIDR prefix such as 10.0.0.0/24, got %q", raw),
 				})
 			}
 		}

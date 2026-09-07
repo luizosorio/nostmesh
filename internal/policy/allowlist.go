@@ -184,6 +184,19 @@ func (a *Allowlist) Grants() []Grant {
 	return grants
 }
 
+// Grant returns a peer's own rule, if it has one.
+//
+// A peer covered only by a group has none: the group is the rule, and reporting
+// a synthesized grant for it would describe something the operator never wrote.
+// Callers that need the answer rather than the rule ask Decide.
+func (a *Allowlist) Grant(peer domain.NostrPublicKey) (Grant, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	grant, known := a.grants[peer]
+	return grant, known
+}
+
 // Size returns how many peers are recorded.
 func (a *Allowlist) Size() int {
 	a.mu.RLock()
