@@ -41,6 +41,14 @@ type sessionRuntime struct {
 func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
 	timeout time.Duration, log *slog.Logger, answered *orchestrator.AnsweredSessions,
 ) (*sessionRuntime, error) {
+	// The interface and the port are the peer's own, derived from its identity.
+	// Sharing either would mean the second session to establish rewrites the
+	// first's kernel state, and the second to end deletes it.
+	slot, err := slotFor(peer, cfg.Node.ListenPort)
+	if err != nil {
+		return nil, err
+	}
+
 	adapter, closeAdapter, err := wireguard.NewController()
 	if err != nil {
 		return nil, err
@@ -84,8 +92,8 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 
 	// The transport claims the port before anything else needs it, because
 	// every candidate this node offers describes that port.
-	//nolint:gosec // a configured listen port is a uint16
-	transport, err := connectivity.NewUDPTransport(uint16(cfg.Node.ListenPort))
+	//nolint:gosec // a derived listen port is a uint16
+	transport, err := connectivity.NewUDPTransport(uint16(slot.Port))
 	if err != nil {
 		return fail(fmt.Errorf("claiming the session port: %w", err))
 	}
@@ -150,7 +158,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Diagnostic: observability.ParseDiagnostic(cfg.Log.Diagnostic),
 	})
 
-	options, err := driverOptions(cfg, peer, timeout)
+	options, err := driverOptions(cfg, peer, timeout, slot)
 	if err != nil {
 		return fail(err)
 	}
@@ -241,10 +249,10 @@ const revocationSeq = 1000
 // file. That is the whole point: a peer stating what it would like to route is
 // a request, and this is the answer, decided locally and in advance.
 func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration,
+	timeout time.Duration, slot peerSlot,
 ) (orchestrator.DriverOptions, error) {
 	options := orchestrator.DriverOptions{
-		InterfaceName: interfaceName,
+		InterfaceName: slot.Interface,
 		MTU:           cfg.Node.MTU,
 		Observers:     cfg.Node.Observers,
 		Diagnostic:    observability.ParseDiagnostic(cfg.Log.Diagnostic),
@@ -331,12 +339,6 @@ func findAuthorizedPeer(cfg config.Config, peer domain.NostrPublicKey) (config.A
 	}
 	return config.AuthorizedPeer{}, false
 }
-
-// interfaceName is the interface a session configures.
-//
-// It carries the ownership prefix that lets every other command tell a NostMesh
-// interface from one it must never touch.
-const interfaceName = "nm0"
 
 // sessionTimeout bounds a whole connection attempt.
 const sessionTimeout = 2 * time.Minute

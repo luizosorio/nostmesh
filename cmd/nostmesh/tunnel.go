@@ -99,14 +99,22 @@ func runStatus(args []string, stdout, stderr *output) int {
 // whether the tunnel is merely configured or actually working.
 func renderStatus(status orchestrator.Status, cfg config.Config, stdout *output) int {
 	stdout.printf("node:      %s\n", cfg.Node.Name)
-	stdout.printf("interface: %s\n", status.Interface)
 
-	if status.ObserveFailed != nil {
+	switch {
+	case status.ObserveFailed != nil:
 		stdout.printf("state:     unknown (%v)\n", status.ObserveFailed)
-	} else if status.InterfaceUp {
+	case status.InterfaceUp():
 		stdout.printf("state:     up\n")
-	} else {
+	default:
 		stdout.printf("state:     down\n")
+	}
+
+	// Every interface, because a node with several sessions carries several.
+	// Naming one expected interface is how this reported "down" while two
+	// tunnels were carrying traffic.
+	for _, observed := range status.Interfaces {
+		stdout.printf("interface: %s (MTU %d, listen port %d)\n",
+			observed.Name, observed.MTU, observed.ListenPort)
 	}
 
 	stdout.printf("\nconfigured peers: %d\n", len(status.Configured))
@@ -117,17 +125,12 @@ func renderStatus(status orchestrator.Status, cfg config.Config, stdout *output)
 		renderObservedPeer(status, peer, stdout)
 	}
 
-	if status.Observed != nil {
-		stdout.printf("\nobserved: MTU %d, listen port %d\n",
-			status.Observed.MTU, status.Observed.ListenPort)
-	}
-
 	return renderPending(status, stdout)
 }
 
 // renderObservedPeer reports what the kernel says about one configured peer.
 func renderObservedPeer(status orchestrator.Status, peer config.Peer, stdout *output) {
-	if status.Observed == nil {
+	if len(status.Interfaces) == 0 {
 		stdout.printf("    observed:    not configured on the host\n")
 		return
 	}
@@ -138,18 +141,23 @@ func renderObservedPeer(status orchestrator.Status, peer config.Peer, stdout *ou
 		return
 	}
 
-	for _, observed := range status.Observed.Peers {
-		if observed.PublicKey != key {
-			continue
+	// Searched across every interface: which one carries a given peer is a
+	// detail of how sessions were allocated, not something an operator asking
+	// about a peer should have to know.
+	for _, iface := range status.Interfaces {
+		for _, observed := range iface.Peers {
+			if observed.PublicKey != key {
+				continue
+			}
+			if observed.HasHandshake() {
+				stdout.printf("    observed:    on %s, handshake %s ago, rx %d, tx %d\n",
+					iface.Name, time.Since(observed.LastHandshake).Round(time.Second),
+					observed.ReceiveBytes, observed.TransmitBytes)
+			} else {
+				stdout.printf("    observed:    on %s, present, no handshake yet\n", iface.Name)
+			}
+			return
 		}
-		if observed.HasHandshake() {
-			stdout.printf("    observed:    handshake %s ago, rx %d, tx %d\n",
-				time.Since(observed.LastHandshake).Round(time.Second),
-				observed.ReceiveBytes, observed.TransmitBytes)
-		} else {
-			stdout.printf("    observed:    present, no handshake yet\n")
-		}
-		return
 	}
 
 	stdout.printf("    observed:    not configured on the host\n")
