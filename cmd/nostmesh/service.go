@@ -306,11 +306,24 @@ func (s *service) run(stdout *output) int {
 		return exitError
 	}
 
+	// A session that never finished negotiating holds its peer's entry, and the
+	// next attempt for that peer is refused as a duplicate — so without this a
+	// negotiation killed partway would lock its own peer out until a restart.
+	expiry := time.NewTicker(staleSessionSweep)
+	defer expiry.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			s.stopAll()
 			return exitOK
+
+		case <-expiry.C:
+			if expired := s.super.ExpireStaleSessions(staleSessionAge); expired > 0 {
+				s.log.Info("expired sessions that never established",
+					observability.Event("session.expired.swept"),
+					slog.Int("count", expired))
+			}
 
 		case received := <-signals:
 			if received == syscall.SIGHUP {
@@ -585,6 +598,15 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, super *supervis
 				observability.Event("session.waited"),
 				slog.String("reason", err.Error()))
 
+		case errors.Is(err, ErrTooManyAttempts):
+			// This node declined to start, not the peer. Counting it as a
+			// failed attempt would grow the backoff for a decision we made, and
+			// the peer would be blamed for congestion on our side.
+			w.observe("waiting", err.Error(), attempt)
+			w.log.Debug("waiting for a negotiation slot",
+				observability.Event("session.deferred"),
+				observability.Reason(observability.ReasonPolicyRefused))
+
 		case errors.Is(err, orchestrator.ErrSessionDropped):
 			// A session that ran and then died is not a failed attempt. Backing
 			// off as though it were would punish a long, healthy session for
@@ -658,6 +680,17 @@ const (
 // early costs a reconnect while ending one late costs nothing but patience.
 const negotiationBound = 2 * time.Minute
 
+// staleSessionSweep is how often abandoned negotiations are looked for, and
+// staleSessionAge is how old one must be to count.
+//
+// The age comfortably exceeds negotiationBound: a session still inside its own
+// deadline is not stale, it is working. Sweeping more eagerly would close
+// sessions that were about to establish.
+const (
+	staleSessionSweep = time.Minute
+	staleSessionAge   = 5 * time.Minute
+)
+
 // roleAfter decides which role to take after an attempt ended.
 //
 // A responder whose wait ended with nobody having called takes the other role
@@ -678,6 +711,14 @@ func roleAfter(err error) orchestrator.Role {
 func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
 	super *supervisor, role orchestrator.Role,
 ) error {
+	// Backpressure before anything is opened. A node restarting with many
+	// authorized peers starts every worker at once, and each negotiation holds a
+	// socket, relay connections and a STUN query before it is a session.
+	if err := super.BeginAttempt(); err != nil {
+		return err
+	}
+	defer super.EndAttempt()
+
 	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, w.log, super)
 	if err != nil {
 		return err
