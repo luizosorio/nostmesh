@@ -387,3 +387,53 @@ func TestAFruitlessWaitMakesTheWorkerOpenTheNextSession(t *testing.T) {
 		}
 	}
 }
+
+// A policy that parses but cannot become decisions is discarded too.
+//
+// The earlier test covers a file that is not JSON, which fails at Load. This one
+// covers the case M2.3 asks about: a configuration that parses and validates,
+// and then fails when it is turned into rules — an unparseable prefix in
+// allowed_ips, which nothing catches until the grant is built.
+//
+// Failing open here would revoke every peer over one malformed line.
+func TestAPolicyThatCannotBecomeRulesIsDiscarded(t *testing.T) {
+	peer := testNostrKey(t, 9)
+	cfg, path := writeServiceConfig(t, peer, false)
+
+	svc := testService(t, cfg, path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.reconcile(ctx, cfg); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+
+	// Structurally fine, semantically broken: allowed_ips holds something that
+	// is not a prefix. Replacing the value rather than rewriting the file keeps
+	// everything else exactly as the fixture wrote it.
+	broken := strings.Replace(readServiceConfig(t, path), "100.96.0.2/32", "not-a-prefix", 1)
+	if !strings.Contains(broken, "not-a-prefix") {
+		t.Fatal("the fixture's shape changed; this test is no longer breaking what it means to break")
+	}
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+
+	svc.reload(ctx)
+
+	if !svc.serving(peer) {
+		t.Error("a malformed prefix revoked a peer that was working; the reload must be all or nothing")
+	}
+}
+
+// readServiceConfig reads the configuration file back.
+func readServiceConfig(t *testing.T, path string) string {
+	t.Helper()
+
+	content, err := os.ReadFile(path) //nolint:gosec // the test's own temporary file
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	return string(content)
+}
