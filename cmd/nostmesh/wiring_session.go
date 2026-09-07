@@ -15,6 +15,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/nostr"
 	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
+	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 )
 
@@ -146,7 +147,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Diagnostic: observability.ParseDiagnostic(cfg.Log.Diagnostic),
 	})
 
-	options, err := driverOptions(cfg, peer, timeout, slot)
+	options, err := driverOptions(cfg, peer, timeout, slot, allowlist)
 	if err != nil {
 		return fail(err)
 	}
@@ -237,7 +238,7 @@ const revocationSeq = 1000
 // file. That is the whole point: a peer stating what it would like to route is
 // a request, and this is the answer, decided locally and in advance.
 func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration, slot peerSlot,
+	timeout time.Duration, slot peerSlot, allowlist *policy.Allowlist,
 ) (orchestrator.DriverOptions, error) {
 	options := orchestrator.DriverOptions{
 		InterfaceName: slot.Interface,
@@ -264,25 +265,19 @@ func driverOptions(cfg config.Config, peer domain.NostrPublicKey,
 		options.OverlayAddrs = []netip.Prefix{overlay}
 	}
 
-	configured, found := findAuthorizedPeer(cfg, peer)
-	if !found {
+	// What reaches the kernel is what policy decided, not what the file says.
+	//
+	// These were read straight from configuration here, which meant the
+	// authorization check and the prefixes it implied came from separate paths —
+	// so a peer could be refused by one and routed by the other. NM-24 makes the
+	// decision carry its own limits precisely so the two cannot disagree.
+	decision := allowlist.Decide(peer, policy.ActionSession)
+	if !decision.Allowed() {
 		return orchestrator.DriverOptions{}, fmt.Errorf(
-			"peer %s is not listed under policy.authorized_peers", peer.Short())
+			"%w: %s (%s)", policy.ErrNotAuthorized, peer.Short(), decision.Reason)
 	}
 
-	for _, raw := range configured.AllowedIPs {
-		prefix, err := netip.ParsePrefix(raw)
-		if err != nil {
-			return orchestrator.DriverOptions{}, fmt.Errorf("peer %s allowed_ips: %w", peer.Short(), err)
-		}
-		options.AllowedIPs = append(options.AllowedIPs, prefix)
-	}
-
-	if len(options.AllowedIPs) == 0 {
-		return orchestrator.DriverOptions{}, fmt.Errorf(
-			"peer %s has no allowed_ips under policy.authorized_peers; a tunnel that accepts nothing is not worth building",
-			peer.Short())
-	}
+	options.AllowedIPs = decision.AllowedIPs
 	return options, nil
 }
 
@@ -306,26 +301,6 @@ func loadIdentity(cfg config.Config) (domain.NodeIdentity, error) {
 		return domain.NodeIdentity{}, fmt.Errorf("%w; run 'nostmesh identity init' first", err)
 	}
 	return node, nil
-}
-
-// findAuthorizedPeer locates a peer's grant in local configuration.
-//
-// The lookup is by Nostr identity, which is the only stable name the far side of
-// a negotiated session has: its tunnel key is generated per session and is not
-// known when the operator writes the configuration. The manually configured
-// [[peers]] entries are keyed by WireGuard key instead, and belong to the manual
-// `up` path rather than to session negotiation.
-func findAuthorizedPeer(cfg config.Config, peer domain.NostrPublicKey) (config.AuthorizedPeer, bool) {
-	for _, candidate := range cfg.Policy.AuthorizedPeers {
-		parsed, err := domain.ParseNostrPublicKey(candidate.PublicKey)
-		if err != nil {
-			continue
-		}
-		if parsed == peer {
-			return candidate, true
-		}
-	}
-	return config.AuthorizedPeer{}, false
 }
 
 // sessionTimeout bounds a whole connection attempt.

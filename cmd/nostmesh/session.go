@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -285,11 +286,26 @@ func loadAllowlist(cfg config.Config) (*policy.Allowlist, error) {
 			actions = append(actions, policy.Action(action))
 		}
 
+		// The prefixes come with the grant rather than being looked up later.
+		// They were dropped here and read straight from configuration at the
+		// point of use, so whether a peer was authorized and what it could route
+		// were answered separately — and only one of them was checked. See
+		// NM-24.
+		allowedIPs := make([]netip.Prefix, 0, len(authorized.AllowedIPs))
+		for _, raw := range authorized.AllowedIPs {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, fmt.Errorf("authorized peer %q allowed_ips: %w", authorized.Alias, err)
+			}
+			allowedIPs = append(allowedIPs, prefix)
+		}
+
 		if err := allowlist.Add(policy.Grant{
-			Peer:    peer,
-			Alias:   authorized.Alias,
-			Actions: actions,
-			Revoked: authorized.Revoked,
+			Peer:       peer,
+			Alias:      authorized.Alias,
+			Actions:    actions,
+			AllowedIPs: allowedIPs,
+			Revoked:    authorized.Revoked,
 		}); err != nil {
 			return nil, fmt.Errorf("authorized peer %q: %w", authorized.Alias, err)
 		}
