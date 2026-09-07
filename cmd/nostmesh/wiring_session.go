@@ -12,12 +12,10 @@ import (
 	"github.com/luizosorio/nostmesh/internal/connectivity"
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
-	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/nostr"
 	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/protocol"
-	"github.com/luizosorio/nostmesh/internal/wireguard"
 )
 
 // sessionRuntime holds everything one session needs, and the order to release
@@ -39,22 +37,22 @@ type sessionRuntime struct {
 // configuration file, which is the local operator's statement of what this node
 // will accept — never from anything a peer sends.
 func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey,
-	timeout time.Duration, log *slog.Logger, answered *orchestrator.AnsweredSessions,
+	timeout time.Duration, log *slog.Logger, super *supervisor,
 ) (*sessionRuntime, error) {
-	// The interface and the port are the peer's own, derived from its identity.
-	// Sharing either would mean the second session to establish rewrites the
-	// first's kernel state, and the second to end deletes it.
-	slot, err := slotFor(peer, cfg.Node.ListenPort)
+	// The interface and the port are the peer's own, claimed from the
+	// supervisor rather than merely derived: two peers deriving the same pair
+	// are refused here, with both named, instead of at a bind failure.
+	slot, err := super.Claim(peer, cfg.Node.ListenPort)
 	if err != nil {
 		return nil, err
 	}
 
-	adapter, closeAdapter, err := wireguard.NewController()
-	if err != nil {
-		return nil, err
-	}
+	// The netlink handle and the session table belong to the supervisor and
+	// outlive this attempt. Everything opened below is this attempt's own, and
+	// is released when it ends.
+	adapter := super.controller
 
-	release := []func(){func() { _ = closeAdapter() }}
+	var release []func()
 	cleanup := func() {
 		for i := len(release) - 1; i >= 0; i-- {
 			release[i]()
@@ -77,18 +75,8 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 	}
 
 	clock := domain.SystemClock{}
-	journal := netstate.NewJournalStore(journalDir(cfg.Node.StateDir))
-	netManager := netstate.NewManager(adapter, journal, clock).WithLogger(log)
-
-	manager, err := orchestrator.NewSessionManager(orchestrator.SessionManagerOptions{
-		Controller:  adapter,
-		NetState:    netManager,
-		Clock:       clock,
-		MaxSessions: cfg.Policy.MaxSessions,
-	})
-	if err != nil {
-		return fail(err)
-	}
+	netManager := super.netstate
+	manager := super.manager
 
 	// The transport claims the port before anything else needs it, because
 	// every candidate this node offers describes that port.
@@ -175,7 +163,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Receiver:   plane,
 		Gatherer:   gatherer,
 		Clock:      clock,
-		Answered:   answered,
+		Answered:   super.answered,
 		Logger:     log,
 	}, options)
 	if err != nil {

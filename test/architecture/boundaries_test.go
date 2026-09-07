@@ -446,6 +446,34 @@ func TestLogEventsUseTheAttributeConstructor(t *testing.T) {
 	}
 }
 
+// TestSessionsShareOneTable keeps the session table shared.
+//
+// A SessionManager built inside the per-attempt wiring holds exactly one
+// session, so `max_sessions` never counts across peers and nothing outlives an
+// attempt to report a peer's history. That was the state before M2.2, and it is
+// a regression a compiler cannot catch: the code builds and every unit test
+// passes, because each manager works perfectly for the one session it can see.
+//
+// The supervisor is the only place allowed to construct one.
+func TestSessionsShareOneTable(t *testing.T) {
+	root := repoRoot(t)
+
+	allowed := []string{
+		// Owns the shared table.
+		"cmd/nostmesh/supervisor.go",
+		// Declares it.
+		"internal/orchestrator/session.go",
+	}
+
+	for _, file := range callersOf(t, root, "NewSessionManager") {
+		if slices.Contains(allowed, file) {
+			continue
+		}
+		t.Errorf("%s builds its own SessionManager; sessions share the supervisor's table, "+
+			"or max_sessions counts one attempt rather than every peer (see M2.2)", file)
+	}
+}
+
 // importsInFile returns every import path in one file.
 func importsInFile(t *testing.T, path string) []string {
 	t.Helper()
