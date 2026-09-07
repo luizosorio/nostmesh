@@ -9,6 +9,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
@@ -23,6 +24,12 @@ var (
 
 	// ErrRevoked reports a peer that was authorized and no longer is.
 	ErrRevoked = errors.New("peer authorization was revoked")
+
+	// errEmptyGroupName reports a group rule with nothing to call it.
+	//
+	// The name appears in an explanation, so a group without one produces a
+	// decision an operator cannot trace back to what caused it.
+	errEmptyGroupName = errors.New("a group rule needs a name")
 )
 
 // Action is something a peer might be permitted to do.
@@ -56,6 +63,13 @@ type Grant struct {
 	// refused, which is what makes the list an allowlist rather than a hint.
 	Actions []Action
 
+	// AllowedIPs are the prefixes this peer may be routed.
+	//
+	// Part of the grant rather than looked up separately: whether a peer is
+	// authorized and what it may route are one decision, and holding them apart
+	// is how the two came to disagree. See NM-24.
+	AllowedIPs []netip.Prefix
+
 	// Revoked withdraws the grant while keeping the record, so an operator can
 	// see that a peer was deliberately removed rather than never added.
 	Revoked bool
@@ -82,6 +96,13 @@ func (g Grant) Allows(action Action) bool {
 type Allowlist struct {
 	mu     sync.RWMutex
 	grants map[domain.NostrPublicKey]Grant
+
+	// groups are rules naming a set of identities at once.
+	//
+	// A slice rather than a map because order is precedence among them, and a
+	// map's iteration order would make which group answered depend on nothing
+	// an operator could see.
+	groups []Group
 }
 
 // NewAllowlist returns an empty allowlist, which authorizes nobody.
