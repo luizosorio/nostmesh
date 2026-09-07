@@ -116,9 +116,24 @@ type Decision struct {
 // permission would produce exactly the effect the outcome exists to gate.
 func (d Decision) Allowed() bool { return d.Outcome == OutcomeAllow }
 
-// deny builds a refusal.
+// deny builds a refusal that no rule produced.
+//
+// Only for deny-by-default: the Rule stays empty because nothing decided, which
+// is what an explanation renders as "none matched". A refusal that a rule did
+// produce uses denyByRule, so the operator is not told no rule matched when one
+// did and simply refused.
 func deny(reason string) Decision {
 	return Decision{Outcome: OutcomeDeny, Reason: reason}
+}
+
+// denyByRule builds a refusal a rule produced, and names it.
+//
+// A peer covered by a rule that does not permit the action it asked for is a
+// different situation from a peer nothing mentions, and an operator debugging
+// the two needs to tell them apart: one means "widen this rule", the other
+// means "write one".
+func denyByRule(reason, rule string) Decision {
+	return Decision{Outcome: OutcomeDeny, Reason: reason, Rule: rule}
 }
 
 // Group is a set of identities a rule may name at once.
@@ -272,38 +287,42 @@ func containsPrefix(permitted []netip.Prefix, announced netip.Prefix) bool {
 
 // decideFromGrant applies a per-peer rule.
 func decideFromGrant(grant Grant, action Action) Decision {
+	rule := "peer " + grant.Peer.Short()
+
 	if grant.Revoked {
-		return deny(ReasonRevoked)
+		return denyByRule(ReasonRevoked, rule)
 	}
 	if !grant.Allows(action) {
-		return deny(ReasonActionNotPermitted)
+		return denyByRule(ReasonActionNotPermitted, rule)
 	}
 	if len(grant.AllowedIPs) == 0 && action == ActionSession {
-		return deny(ReasonNothingRouted)
+		return denyByRule(ReasonNothingRouted, rule)
 	}
 
 	return Decision{
 		Outcome:    OutcomeAllow,
 		Reason:     ReasonAllowedByRule,
 		AllowedIPs: slices.Clone(grant.AllowedIPs),
-		Rule:       "peer " + grant.Peer.Short(),
+		Rule:       rule,
 	}
 }
 
 // decideFromGroup applies a group rule.
 func decideFromGroup(group Group, action Action) Decision {
+	rule := "group " + group.Name
+
 	if !group.Allows(action) {
-		return deny(ReasonActionNotPermitted)
+		return denyByRule(ReasonActionNotPermitted, rule)
 	}
 	if len(group.AllowedIPs) == 0 && action == ActionSession {
-		return deny(ReasonNothingRouted)
+		return denyByRule(ReasonNothingRouted, rule)
 	}
 
 	return Decision{
 		Outcome:    OutcomeAllow,
 		Reason:     ReasonAllowedByGroup,
 		AllowedIPs: slices.Clone(group.AllowedIPs),
-		Rule:       "group " + group.Name,
+		Rule:       rule,
 	}
 }
 

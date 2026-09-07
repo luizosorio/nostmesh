@@ -527,3 +527,52 @@ func TestAGroupRouteStillRefusesTheDefaultRoute(t *testing.T) {
 		t.Error("a group rule allowed a default route")
 	}
 }
+
+// A refusal names the rule that produced it.
+//
+// Found by reading the explanation for a group member: every refusal reported
+// an empty rule, which an explanation renders as "none matched". That is true
+// only for deny-by-default. Telling an operator no rule matched when one did
+// and simply refused sends them to write a rule they already have.
+//
+// The two situations need different fixes — widen this rule, or write one — so
+// the answer has to tell them apart.
+func TestARefusalNamesTheRuleThatProducedIt(t *testing.T) {
+	named := decisionKey(t, "a named peer")
+	member := decisionKey(t, "a group member")
+	stranger := decisionKey(t, "nobody")
+
+	list := NewAllowlist()
+	if err := list.Add(Grant{
+		Peer: named, Actions: []Action{ActionSession}, AllowedIPs: prefixes("10.0.0.0/8"),
+	}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+	if err := list.AddGroup(Group{
+		Name: "my-devices", Members: []domain.NostrPublicKey{member},
+		Actions: []Action{ActionSession}, AllowedIPs: prefixes("100.96.0.0/24"),
+	}); err != nil {
+		t.Fatalf("adding group: %v", err)
+	}
+
+	// Both are refused the same action, and both are covered by a rule.
+	if decision := list.Decide(named, ActionTransit); decision.Rule != "peer "+named.Short() {
+		t.Errorf("a per-peer refusal reports rule %q; the rule that refused must be named", decision.Rule)
+	}
+	if decision := list.Decide(member, ActionTransit); decision.Rule != "group my-devices" {
+		t.Errorf("a group refusal reports rule %q; the rule that refused must be named", decision.Rule)
+	}
+
+	// Revocation is a rule too: the operator wrote it deliberately.
+	if err := list.Revoke(named); err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+	if decision := list.Decide(named, ActionSession); decision.Rule != "peer "+named.Short() {
+		t.Errorf("a revocation reports rule %q; it is the operator's own rule", decision.Rule)
+	}
+
+	// Deny-by-default is the one refusal nothing produced, and it stays empty.
+	if decision := list.Decide(stranger, ActionSession); decision.Rule != "" {
+		t.Errorf("deny-by-default reports rule %q; nothing produced it", decision.Rule)
+	}
+}
