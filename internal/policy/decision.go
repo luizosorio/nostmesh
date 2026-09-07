@@ -61,6 +61,27 @@ const (
 	// makes possible to ask.
 	ReasonAllowedByGroup = "allowed_by_group"
 
+	// ReasonDefaultRouteNotAccepted reports a default route this node will not
+	// take.
+	//
+	// Distinct from a prefix nobody authorized: the peer may be perfectly
+	// entitled to announce routes, and this particular one is still refused
+	// because the operator never said the node should send everything through a
+	// tunnel.
+	ReasonDefaultRouteNotAccepted = "default_route_not_accepted"
+
+	// ReasonDefaultRouteNeedsConfirmation reports a default route a person must
+	// approve.
+	//
+	// A default route captures all traffic including the tunnel's own transport
+	// endpoint, so installing one silently is how a node loses connectivity to
+	// the peer carrying it. Enabling accept_default_route says the operator is
+	// willing to consider one, never that a peer may install it.
+	ReasonDefaultRouteNeedsConfirmation = "default_route_needs_confirmation"
+
+	// ReasonPrefixNotAllowed reports an announcement outside the rule's limits.
+	ReasonPrefixNotAllowed = "prefix_not_allowed"
+
 	// ReasonNothingRouted reports an allowed peer with no prefixes.
 	//
 	// An allow with nothing to route builds a tunnel that carries nothing, so it
@@ -158,6 +179,95 @@ func (a *Allowlist) Decide(peer domain.NostrPublicKey, action Action) Decision {
 	// No rule mentions this peer. This is the default, and it is a decision
 	// rather than a gap: absence of a rule is a refusal.
 	return deny(ReasonNoRule)
+}
+
+// DecideRoute answers whether a peer may have a prefix it announced installed.
+//
+// Separate from Decide because a route announcement is about a particular
+// prefix, and the answer differs between two prefixes the same peer announces
+// in one message. Decide answers about an identity and an action; this answers
+// about a destination.
+//
+// The order matters and is deliberate: authorization first, then the prefix.
+// Asking about a prefix from a peer no rule authorizes would leak that the
+// prefix itself was interesting, and a peer that may not announce routes gets
+// one answer regardless of what it asked for.
+func (a *Allowlist) DecideRoute(peer domain.NostrPublicKey, prefix netip.Prefix) Decision {
+	decision := a.Decide(peer, ActionRoute)
+	if !decision.Allowed() {
+		return decision
+	}
+
+	if isDefaultRoute(prefix) {
+		return a.decideDefaultRoute(decision)
+	}
+
+	// The announced prefix has to fall inside what the rule permits. A peer
+	// authorized for 10.0.0.0/8 announcing 192.168.0.0/16 is asking for
+	// something nobody granted, and the rule's limits are the answer.
+	if !containsPrefix(decision.AllowedIPs, prefix) {
+		return Decision{
+			Outcome: OutcomeDeny,
+			Reason:  ReasonPrefixNotAllowed,
+			Rule:    decision.Rule,
+		}
+	}
+
+	return Decision{
+		Outcome:    OutcomeAllow,
+		Reason:     decision.Reason,
+		AllowedIPs: []netip.Prefix{prefix},
+		Rule:       decision.Rule,
+	}
+}
+
+// decideDefaultRoute answers about 0.0.0.0/0 or ::/0.
+//
+// Never ALLOW. With the setting off the answer is DENY; with it on the answer is
+// REQUIRE_CONFIRMATION, because the setting says the operator is willing to be
+// asked, not that a peer may install one. Nothing a peer sends moves this.
+func (a *Allowlist) decideDefaultRoute(authorized Decision) Decision {
+	a.mu.RLock()
+	accept := a.acceptDefaultRoute
+	a.mu.RUnlock()
+
+	if !accept {
+		return Decision{
+			Outcome: OutcomeDeny,
+			Reason:  ReasonDefaultRouteNotAccepted,
+			Rule:    authorized.Rule,
+		}
+	}
+
+	return Decision{
+		Outcome: OutcomeConfirm,
+		Reason:  ReasonDefaultRouteNeedsConfirmation,
+		Rule:    authorized.Rule,
+	}
+}
+
+// isDefaultRoute reports whether a prefix covers everything.
+//
+// A zero-length prefix matches every address of its family, which is what makes
+// it capture the tunnel's own transport endpoint.
+func isDefaultRoute(prefix netip.Prefix) bool { return prefix.Bits() == 0 }
+
+// containsPrefix reports whether one of the permitted prefixes covers the
+// announced one.
+//
+// Containment rather than equality: a rule permitting 10.0.0.0/8 covers an
+// announcement of 10.1.0.0/16, which is narrower and therefore within what was
+// granted. The reverse is not true, and Overlaps would wrongly accept it.
+func containsPrefix(permitted []netip.Prefix, announced netip.Prefix) bool {
+	for _, allowed := range permitted {
+		if allowed.Bits() > announced.Bits() {
+			continue
+		}
+		if allowed.Contains(announced.Masked().Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 // decideFromGrant applies a per-peer rule.

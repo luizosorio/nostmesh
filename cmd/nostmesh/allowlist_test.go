@@ -233,6 +233,42 @@ func TestAuthorizedPeersAreOrdered(t *testing.T) {
 	}
 }
 
+// The configuration flag reaches the decision.
+//
+// The field existed and nothing read it, so a node could not be asked about a
+// default route however its operator configured it.
+func TestAcceptDefaultRouteReachesTheDecision(t *testing.T) {
+	peer := testNostrKey(t, 70)
+	defaultRoute := netip.MustParsePrefix("0.0.0.0/0")
+
+	build := func(accept bool) policy.Decision {
+		cfg := config.Default()
+		cfg.Policy.AcceptDefaultRoute = accept
+		cfg.Policy.AuthorizedPeers = []config.AuthorizedPeer{{
+			PublicKey:  peer.String(),
+			Alias:      "a-router",
+			Actions:    []string{"route"},
+			AllowedIPs: []string{"0.0.0.0/0"},
+		}}
+
+		allowlist, err := loadAllowlist(cfg)
+		if err != nil {
+			t.Fatalf("loading: %v", err)
+		}
+		return allowlist.DecideRoute(peer, defaultRoute)
+	}
+
+	if outcome := build(false).Outcome; outcome != policy.OutcomeDeny {
+		t.Errorf("with the setting off, outcome = %q, want deny", outcome)
+	}
+	if outcome := build(true).Outcome; outcome != policy.OutcomeConfirm {
+		t.Errorf("with the setting on, outcome = %q, want require_confirmation", outcome)
+	}
+	if build(true).Allowed() {
+		t.Error("enabling the setting granted permission rather than a question")
+	}
+}
+
 func peersEqual(got, want []domain.NostrPublicKey) bool {
 	if len(got) != len(want) {
 		return false
