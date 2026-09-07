@@ -46,6 +46,8 @@ func TestPayloadTypeDetection(t *testing.T) {
 		{"ready", Payload{Ready: &SessionReady{}}, TypeSessionReady},
 		{"keepalive", Payload{Keepalive: &SessionKeepalive{}}, TypeSessionKeepalive},
 		{"close", Payload{Close: &SessionClose{}}, TypeSessionClose},
+		{"route announce", Payload{RouteAnnounce: &RouteAnnounce{}}, TypeRouteAnnounce},
+		{"route withdraw", Payload{RouteWithdraw: &RouteWithdraw{}}, TypeRouteWithdraw},
 		{"error", Payload{Error: &SessionError{}}, TypeSessionError},
 	}
 

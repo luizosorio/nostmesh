@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -247,5 +248,189 @@ func TestAssociatedDataIsUnambiguous(t *testing.T) {
 
 	if string(first.AssociatedData()) == string(second.AssociatedData()) {
 		t.Error("different field values produced identical associated data")
+	}
+}
+
+// validRouteAnnounce is an announcement that passes, so each test alters one
+// field and attributes the failure to it.
+func validRouteAnnounce() RouteAnnounce {
+	return RouteAnnounce{
+		Routes:     []AnnouncedRoute{{Prefix: "10.20.30.0/24", Metric: 10}},
+		NetworkID:  "lab",
+		Version:    1,
+		ValidUntil: testNow().Add(5 * time.Minute).Unix(),
+	}
+}
+
+// A well-formed announcement is accepted, which is what makes the rejections
+// below mean something.
+func TestAValidRouteAnnouncementPasses(t *testing.T) {
+	envelope := validEnvelope()
+	envelope.Type = TypeRouteAnnounce
+	announce := validRouteAnnounce()
+
+	if err := ValidatePayload(Payload{RouteAnnounce: &announce}, envelope, testNow()); err != nil {
+		t.Fatalf("a valid announcement was refused: %v", err)
+	}
+}
+
+// A route message is validated rather than falling through untouched.
+//
+// The payload switch ends in a default that returns nil for the types carrying
+// nothing to check. A new type that nobody added a case for lands there and is
+// accepted whatever it holds, which is the failure this pins.
+func TestRouteMessagesAreValidated(t *testing.T) {
+	envelope := validEnvelope()
+	envelope.Type = TypeRouteAnnounce
+
+	empty := RouteAnnounce{}
+	if err := ValidatePayload(Payload{RouteAnnounce: &empty}, envelope, testNow()); err == nil {
+		t.Error("an empty announcement was accepted; the payload switch has no case for it")
+	}
+
+	envelope.Type = TypeRouteWithdraw
+	emptyWithdraw := RouteWithdraw{}
+	if err := ValidatePayload(Payload{RouteWithdraw: &emptyWithdraw}, envelope, testNow()); err == nil {
+		t.Error("an empty withdrawal was accepted; the payload switch has no case for it")
+	}
+}
+
+func TestRouteAnnouncementRejections(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*RouteAnnounce)
+		want   error
+	}{
+		{"no routes", func(a *RouteAnnounce) { a.Routes = nil }, ErrMalformed},
+		{"no network", func(a *RouteAnnounce) { a.NetworkID = "" }, ErrMalformed},
+		{"no validity", func(a *RouteAnnounce) { a.ValidUntil = 0 }, ErrMalformed},
+		{"negative validity", func(a *RouteAnnounce) { a.ValidUntil = -1 }, ErrMalformed},
+		{
+			"unparseable prefix",
+			func(a *RouteAnnounce) { a.Routes[0].Prefix = "not-a-prefix" },
+			ErrMalformed,
+		},
+		{
+			"an address rather than a prefix",
+			func(a *RouteAnnounce) { a.Routes[0].Prefix = "10.20.30.1" },
+			ErrMalformed,
+		},
+		{
+			// 10.20.30.1/24 and 10.20.30.0/24 are one destination. Accepting
+			// both lets one sender hold two entries for it, which hides a
+			// conflict and defeats duplicate suppression.
+			"a prefix that is not canonical",
+			func(a *RouteAnnounce) { a.Routes[0].Prefix = "10.20.30.1/24" },
+			ErrMalformed,
+		},
+		{
+			"the same prefix twice",
+			func(a *RouteAnnounce) {
+				a.Routes = append(a.Routes, AnnouncedRoute{Prefix: "10.20.30.0/24"})
+			},
+			ErrMalformed,
+		},
+		{
+			"more routes than the limit",
+			func(a *RouteAnnounce) {
+				a.Routes = make([]AnnouncedRoute, maxAnnouncedRoutes+1)
+				for i := range a.Routes {
+					a.Routes[i] = AnnouncedRoute{Prefix: fmt.Sprintf("10.%d.0.0/16", i)}
+				}
+			},
+			ErrTooLarge,
+		},
+	}
+
+	envelope := validEnvelope()
+	envelope.Type = TypeRouteAnnounce
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			announce := validRouteAnnounce()
+			test.mutate(&announce)
+
+			err := ValidatePayload(Payload{RouteAnnounce: &announce}, envelope, testNow())
+			if !errors.Is(err, test.want) {
+				t.Errorf("error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRouteWithdrawalRejections(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*RouteWithdraw)
+		want   error
+	}{
+		{"no prefixes", func(w *RouteWithdraw) { w.Prefixes = nil }, ErrMalformed},
+		{"no network", func(w *RouteWithdraw) { w.NetworkID = "" }, ErrMalformed},
+		{
+			"unparseable prefix",
+			func(w *RouteWithdraw) { w.Prefixes = []string{"not-a-prefix"} },
+			ErrMalformed,
+		},
+		{
+			"a prefix that is not canonical",
+			func(w *RouteWithdraw) { w.Prefixes = []string{"10.20.30.1/24"} },
+			ErrMalformed,
+		},
+		{
+			"the same prefix twice",
+			func(w *RouteWithdraw) { w.Prefixes = []string{"10.20.30.0/24", "10.20.30.0/24"} },
+			ErrMalformed,
+		},
+	}
+
+	envelope := validEnvelope()
+	envelope.Type = TypeRouteWithdraw
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			withdraw := RouteWithdraw{
+				Prefixes:  []string{"10.20.30.0/24"},
+				NetworkID: "lab",
+				Version:   2,
+			}
+			test.mutate(&withdraw)
+
+			err := ValidatePayload(Payload{RouteWithdraw: &withdraw}, envelope, testNow())
+			if !errors.Is(err, test.want) {
+				t.Errorf("error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+// A route type declared in the envelope must match the payload.
+//
+// The binding between the visible type and the encrypted content: a relay sees
+// route.announce, and the receiver must not find a session message inside.
+func TestARouteEnvelopeMustCarryARoutePayload(t *testing.T) {
+	envelope := validEnvelope()
+	envelope.Type = TypeRouteAnnounce
+
+	withdraw := RouteWithdraw{Prefixes: []string{"10.0.0.0/8"}, NetworkID: "lab"}
+	if err := ValidatePayload(Payload{RouteWithdraw: &withdraw}, envelope, testNow()); !errors.Is(err, ErrTypeMismatch) {
+		t.Errorf("error = %v, want %v", err, ErrTypeMismatch)
+	}
+}
+
+// The new types are accepted by envelope validation.
+//
+// Without an entry in the closed set they are refused as unknown, which would
+// make every route message fail before its payload is ever read.
+func TestRouteTypesAreKnown(t *testing.T) {
+	for _, kind := range []MessageType{TypeRouteAnnounce, TypeRouteWithdraw} {
+		if !kind.IsKnown() {
+			t.Errorf("%s is not in the closed set of known types", kind)
+		}
+
+		envelope := validEnvelope()
+		envelope.Type = kind
+		if err := ValidateEnvelope(envelope, localNodeKey(), testNow()); err != nil {
+			t.Errorf("%s: envelope refused: %v", kind, err)
+		}
 	}
 }

@@ -20,6 +20,9 @@ type Payload struct {
 	Keepalive *SessionKeepalive `json:"keepalive,omitempty"`
 	Close     *SessionClose     `json:"close,omitempty"`
 	Error     *SessionError     `json:"error,omitempty"`
+
+	RouteAnnounce *RouteAnnounce `json:"route_announce,omitempty"`
+	RouteWithdraw *RouteWithdraw `json:"route_withdraw,omitempty"`
 }
 
 // Capabilities declares what a node supports.
@@ -172,6 +175,70 @@ type CandidateUpdate struct {
 	Final bool `json:"final,omitempty"`
 }
 
+// RouteAnnounce offers prefixes the sender says it can reach.
+//
+// Every field is a claim about the sender, and none of it configures anything
+// here. The receiver validates the shape, asks local policy about each prefix,
+// resolves conflicts against what it already has, and selects — and may install
+// nothing at all. See NM-25.
+type RouteAnnounce struct {
+	// Routes are the prefixes offered.
+	Routes []AnnouncedRoute `json:"routes"`
+
+	// NetworkID names the network these prefixes belong to.
+	//
+	// A prefix is only meaningful inside a network: two networks may both use
+	// 10.0.0.0/8 and mean different hosts, so a receiver that belongs to
+	// neither has no business installing either.
+	NetworkID string `json:"network_id"`
+
+	// Version orders announcements from one provider.
+	//
+	// Monotonic per sender. A lower version than the one already held is a
+	// replay or a reordering, and is dropped rather than applied — otherwise a
+	// relay redelivering an old announcement would resurrect a withdrawn route.
+	Version uint64 `json:"version"`
+
+	// ValidUntil is when these routes stop being offered, in Unix seconds.
+	//
+	// Reachability that depends on a provider must not outlive the provider's
+	// ability to say so, so a route is dropped when this passes even if nothing
+	// was heard from the sender.
+	ValidUntil int64 `json:"valid_until"`
+}
+
+// AnnouncedRoute is one prefix and what the sender claims about it.
+type AnnouncedRoute struct {
+	// Prefix is the destination in CIDR notation.
+	Prefix string `json:"prefix"`
+
+	// Metric is the sender's claim about its own cost to the prefix.
+	//
+	// An input to selection, never the decision. The architecture is explicit
+	// that announced metrics stay separate from locally measured ones: a
+	// provider describing its own path is interested in the answer.
+	Metric uint32 `json:"metric"`
+
+	// Capabilities describes what the path supports.
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// RouteWithdraw retracts prefixes the sender previously announced.
+//
+// Withdrawing something never announced is not an error: the two sides may
+// disagree about what is held, and the wanted state — this node not routing that
+// prefix through this peer — is the same either way.
+type RouteWithdraw struct {
+	// Prefixes are the destinations no longer offered, in CIDR notation.
+	Prefixes []string `json:"prefixes"`
+
+	// NetworkID names the network the prefixes belong to.
+	NetworkID string `json:"network_id"`
+
+	// Version orders this against announcements from the same sender.
+	Version uint64 `json:"version"`
+}
+
 // SessionReady reports that the sender confirmed the tunnel locally.
 //
 // It is informative only. The receiver establishes its own session when its own
@@ -280,6 +347,8 @@ func (p Payload) TypeOf() (MessageType, error) {
 		{p.Keepalive != nil, TypeSessionKeepalive},
 		{p.Close != nil, TypeSessionClose},
 		{p.Error != nil, TypeSessionError},
+		{p.RouteAnnounce != nil, TypeRouteAnnounce},
+		{p.RouteWithdraw != nil, TypeRouteWithdraw},
 	}
 
 	for _, entry := range set {

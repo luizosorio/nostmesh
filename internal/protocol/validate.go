@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -183,6 +184,10 @@ func ValidatePayload(p Payload, e Envelope, now time.Time) error {
 		return validateClose(*p.Close)
 	case p.Error != nil:
 		return validateError(*p.Error)
+	case p.RouteAnnounce != nil:
+		return validateRouteAnnounce(*p.RouteAnnounce)
+	case p.RouteWithdraw != nil:
+		return validateRouteWithdraw(*p.RouteWithdraw)
 	default:
 		// Ready and Keepalive carry nothing that needs checking.
 		return nil
@@ -274,6 +279,91 @@ func validateTunnelKey(k TunnelKey, now time.Time) error {
 		return fmt.Errorf("%w: tunnel key expired at %s", ErrExpired, k.ExpiryTime().Format(time.RFC3339))
 	}
 
+	return nil
+}
+
+// maxAnnouncedRoutes caps one announcement.
+//
+// A bound on what a single message can cost to process, in the same spirit as
+// the candidate limit. It is generous for a subnet router and far below what
+// would make validation itself the attack.
+const maxAnnouncedRoutes = 64
+
+// validateRouteAnnounce checks the shape of an announcement.
+//
+// Shape only. Whether a prefix may be routed is a policy question and a conflict
+// question, answered later by code that knows this node's own addresses — see
+// NM-25. What is refused here is a message that could not be meaningful whatever
+// the policy: no routes, an unparseable prefix, a prefix that is not in its
+// canonical form.
+func validateRouteAnnounce(a RouteAnnounce) error {
+	if len(a.Routes) == 0 {
+		return fmt.Errorf("%w: route announcement carries no routes", ErrMalformed)
+	}
+	if len(a.Routes) > maxAnnouncedRoutes {
+		return fmt.Errorf("%w: %d routes, limit is %d", ErrTooLarge, len(a.Routes), maxAnnouncedRoutes)
+	}
+	if a.NetworkID == "" {
+		return fmt.Errorf("%w: route announcement names no network", ErrMalformed)
+	}
+	if a.ValidUntil <= 0 {
+		return fmt.Errorf("%w: route announcement has no validity", ErrMalformed)
+	}
+
+	seen := make(map[string]bool, len(a.Routes))
+	for i, route := range a.Routes {
+		if err := validateAnnouncedPrefix(route.Prefix, i); err != nil {
+			return err
+		}
+		if seen[route.Prefix] {
+			return fmt.Errorf("%w: prefix %q repeats", ErrMalformed, route.Prefix)
+		}
+		seen[route.Prefix] = true
+	}
+
+	return nil
+}
+
+// validateRouteWithdraw checks the shape of a withdrawal.
+func validateRouteWithdraw(w RouteWithdraw) error {
+	if len(w.Prefixes) == 0 {
+		return fmt.Errorf("%w: route withdrawal carries no prefixes", ErrMalformed)
+	}
+	if len(w.Prefixes) > maxAnnouncedRoutes {
+		return fmt.Errorf("%w: %d prefixes, limit is %d", ErrTooLarge, len(w.Prefixes), maxAnnouncedRoutes)
+	}
+	if w.NetworkID == "" {
+		return fmt.Errorf("%w: route withdrawal names no network", ErrMalformed)
+	}
+
+	seen := make(map[string]bool, len(w.Prefixes))
+	for i, prefix := range w.Prefixes {
+		if err := validateAnnouncedPrefix(prefix, i); err != nil {
+			return err
+		}
+		if seen[prefix] {
+			return fmt.Errorf("%w: prefix %q repeats", ErrMalformed, prefix)
+		}
+		seen[prefix] = true
+	}
+
+	return nil
+}
+
+// validateAnnouncedPrefix checks one prefix is parseable and canonical.
+//
+// Canonical form is required rather than normalized silently: 10.0.0.1/8 and
+// 10.0.0.0/8 mean the same route, and accepting both would let one sender occupy
+// two entries for one destination — which is how a conflict becomes invisible
+// and a duplicate-suppression check stops working.
+func validateAnnouncedPrefix(value string, index int) error {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return fmt.Errorf("%w: route %d has an unparseable prefix", ErrMalformed, index)
+	}
+	if prefix != prefix.Masked() {
+		return fmt.Errorf("%w: route %d prefix %q is not in canonical form", ErrMalformed, index, value)
+	}
 	return nil
 }
 
