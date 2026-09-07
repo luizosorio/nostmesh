@@ -474,6 +474,75 @@ func TestSessionsShareOneTable(t *testing.T) {
 	}
 }
 
+// TestAllowedIPsComeFromAPolicyDecision keeps the limits on the decision path.
+//
+// `policy.authorized_peers[].allowed_ips` is policy configuration, and it used to
+// reach the kernel without passing through policy: the peer was looked up in the
+// configuration file and the field read directly. The authorization check and the
+// limits it implied travelled separately, so the two could disagree — and the
+// disagreement was silent, because the check still ran and still passed.
+//
+// Reading that field outside the loader is what reintroduces it. See NM-24.
+func TestAllowedIPsComeFromAPolicyDecision(t *testing.T) {
+	root := repoRoot(t)
+
+	allowed := []string{
+		// Turns configuration into grants, which is where the field belongs.
+		"cmd/nostmesh/session.go",
+		// Declares it.
+		"internal/config/config.go",
+		// Validates it.
+		"internal/config/validate.go",
+		// Counts authorized and revoked peers for a diagnostic summary. It
+		// reads no prefixes and configures nothing, so it cannot disagree with
+		// a decision — there is no decision involved.
+		"cmd/nostmesh/doctor.go",
+		// This test necessarily names it.
+		"test/architecture/boundaries_test.go",
+	}
+
+	// A text scan, not callersOf: that one looks for method calls (`.Name(`),
+	// and AuthorizedPeers is a field. An earlier version of this guard used it
+	// and matched nothing at all — it passed against a planted violation sitting
+	// in the very file it was meant to watch.
+	//
+	// The pattern is reaching into the configuration's peer list, from anywhere
+	// that is not the loader. Matching a variable name would miss a plant that
+	// renamed it.
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		rel := relative(t, path)
+		if slices.Contains(allowed, rel) {
+			return nil
+		}
+
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(content), "Policy.AuthorizedPeers") {
+			t.Errorf("%s reaches into policy.authorized_peers; the prefixes that reach the "+
+				"kernel come from what policy decided, or the check and the limits can disagree (see NM-24)", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning repository: %v", err)
+	}
+}
+
 // importsInFile returns every import path in one file.
 func importsInFile(t *testing.T, path string) []string {
 	t.Helper()
