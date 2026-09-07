@@ -51,6 +51,14 @@ type Node struct {
 
 // Harness is a two-node testbed with a configurable relay set.
 type Harness struct {
+	// Nodes are the participants, in the order they were created.
+	//
+	// A slice rather than a pair: M2.2 is about several sessions coexisting, and
+	// a testbed that can only hold two cannot exercise it. Alice and Bob remain
+	// as names for the first two, because most tests are about one pair and
+	// reading `h.Alice` says more than `h.Nodes[0]`.
+	Nodes []*Node
+
 	Alice  *Node
 	Bob    *Node
 	Relays []*nostr.FakeRelay
@@ -70,6 +78,10 @@ type HarnessOptions struct {
 
 	// Clock is injected so timing is deterministic.
 	Clock func() time.Time
+
+	// NodeCount is how many participants to create. Zero means two, which is
+	// what every test written before the mesh expected.
+	NodeCount int
 
 	// Logger captures what the run logged, so a test can assert on it.
 	// Optional: a run that does not care about output supplies nothing.
@@ -99,32 +111,60 @@ func NewHarness(opts HarnessOptions) (*Harness, error) {
 		logger = observability.Discard()
 	}
 
+	if opts.NodeCount <= 0 {
+		opts.NodeCount = 2
+	}
+
 	harness := &Harness{Relays: relays, clock: opts.Clock, log: logger}
 
-	alice, err := harness.newNode("alice", "198.51.100.10:51820")
-	if err != nil {
-		return nil, err
-	}
-	bob, err := harness.newNode("bob", "198.51.100.20:51820")
-	if err != nil {
-		return nil, err
-	}
-
-	// Each authorizes the other. Deny-by-default means this is required, not
-	// incidental: without it the handshake refuses before any network work.
-	if err := alice.Allowlist.Add(policy.Grant{
-		Peer: bob.Public, Alias: "bob", Actions: []policy.Action{policy.ActionSession},
-	}); err != nil {
-		return nil, err
-	}
-	if err := bob.Allowlist.Add(policy.Grant{
-		Peer: alice.Public, Alias: "alice", Actions: []policy.Action{policy.ActionSession},
-	}); err != nil {
-		return nil, err
+	for i := range opts.NodeCount {
+		// Addresses are spaced so each node is distinguishable in a capture and
+		// no two share one, which would make a verified path ambiguous.
+		node, err := harness.newNode(nodeName(i), fmt.Sprintf("198.51.100.%d:51820", 10+i*10))
+		if err != nil {
+			return nil, err
+		}
+		harness.Nodes = append(harness.Nodes, node)
 	}
 
-	harness.Alice, harness.Bob = alice, bob
+	// Every node authorizes every other. Deny-by-default means this is required,
+	// not incidental: without it a handshake refuses before any network work.
+	//
+	// A full mesh of grants is not a full mesh of sessions — the roadmap is
+	// explicit that a mesh need not be complete. It is what lets a test choose
+	// any pair without the allowlist being the thing that refused.
+	for _, node := range harness.Nodes {
+		for _, peer := range harness.Nodes {
+			if peer.Public == node.Public {
+				continue
+			}
+			if err := node.Allowlist.Add(policy.Grant{
+				Peer: peer.Public, Alias: peer.Name, Actions: []policy.Action{policy.ActionSession},
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	harness.Alice = harness.Nodes[0]
+	if len(harness.Nodes) > 1 {
+		harness.Bob = harness.Nodes[1]
+	}
 	return harness, nil
+}
+
+// nodeName labels a participant.
+//
+// The first two keep the names the earlier tests used, so a failure in one of
+// them still reads the way it always did.
+func nodeName(index int) string {
+	switch index {
+	case 0:
+		return "alice"
+	case 1:
+		return "bob"
+	}
+	return fmt.Sprintf("node-%d", index)
 }
 
 func (h *Harness) newNode(name, address string) (*Node, error) {
@@ -196,7 +236,16 @@ type HandshakeResult struct {
 // It exercises the real protocol path: build, seal, publish across relays,
 // receive with deduplication, open, validate, and advance the state machine on
 // both sides.
+// Connect runs a session between the first two nodes.
+//
+// Kept for the tests written before the mesh, which are about one pair and read
+// better without naming it every time.
 func (h *Harness) Connect(ctx context.Context) HandshakeResult {
+	return h.ConnectPair(ctx, h.Alice, h.Bob)
+}
+
+// ConnectPair runs a session between any two nodes.
+func (h *Harness) ConnectPair(ctx context.Context, from, to *Node) HandshakeResult {
 	started := h.clock()
 	result := HandshakeResult{}
 
@@ -208,14 +257,14 @@ func (h *Harness) Connect(ctx context.Context) HandshakeResult {
 	}
 	result.SessionID = sessionID
 
-	initiator, responder, err := h.buildHandshakes(sessionID)
+	initiator, responder, err := h.buildHandshakes(sessionID, from, to)
 	if err != nil {
 		result.Err = err
 		result.Phase = "setup"
 		return result
 	}
 
-	if err := h.exchange(ctx, initiator, responder); err != nil {
+	if err := h.exchange(ctx, initiator, responder, from, to); err != nil {
 		result.Err = err
 		result.Phase = "negotiating"
 		result.Duration = h.clock().Sub(started)
@@ -224,8 +273,8 @@ func (h *Harness) Connect(ctx context.Context) HandshakeResult {
 
 	// Both sides agreed. Verifying the path is the next phase, and the
 	// connectivity engine refuses anything unproved.
-	endpoint, err := h.verifyPath(ctx, h.Bob.Address, sessionID.String(),
-		h.Alice.TunnelPublic.String(), h.Bob.TunnelPublic.String())
+	endpoint, err := h.verifyPath(ctx, to.Address, sessionID.String(),
+		from.TunnelPublic.String(), to.TunnelPublic.String())
 	if err != nil {
 		result.Err = err
 		result.Phase = "checking"
@@ -239,13 +288,13 @@ func (h *Harness) Connect(ctx context.Context) HandshakeResult {
 	return result
 }
 
-func (h *Harness) buildHandshakes(sessionID domain.SessionID) (initiator, responder *session.Handshake, err error) {
+func (h *Harness) buildHandshakes(sessionID domain.SessionID, from, to *Node) (initiator, responder *session.Handshake, err error) {
 	now := h.clock()
 
 	initiator, err = session.New(session.Options{
 		Role: session.RoleInitiator, SessionID: sessionID,
-		LocalKey: h.Alice.Public, PeerKey: h.Bob.Public,
-		TunnelPublic: h.Alice.TunnelPublic, TunnelPrivate: h.Alice.TunnelPrivate,
+		LocalKey: from.Public, PeerKey: to.Public,
+		TunnelPublic: from.TunnelPublic, TunnelPrivate: from.TunnelPrivate,
 		Now: now,
 	})
 	if err != nil {
@@ -254,8 +303,8 @@ func (h *Harness) buildHandshakes(sessionID domain.SessionID) (initiator, respon
 
 	responder, err = session.New(session.Options{
 		Role: session.RoleResponder, SessionID: sessionID,
-		LocalKey: h.Bob.Public, PeerKey: h.Alice.Public,
-		TunnelPublic: h.Bob.TunnelPublic, TunnelPrivate: h.Bob.TunnelPrivate,
+		LocalKey: to.Public, PeerKey: from.Public,
+		TunnelPublic: to.TunnelPublic, TunnelPrivate: to.TunnelPrivate,
 		Now: now,
 	})
 	if err != nil {
@@ -266,7 +315,7 @@ func (h *Harness) buildHandshakes(sessionID domain.SessionID) (initiator, respon
 }
 
 // exchange drives request → offer → accept over the relay set.
-func (h *Harness) exchange(ctx context.Context, initiator, responder *session.Handshake) error {
+func (h *Harness) exchange(ctx context.Context, initiator, responder *session.Handshake, from, to *Node) error {
 	now := h.clock()
 
 	nonce, err := domain.NewNonce(rand.Reader)
@@ -279,12 +328,12 @@ func (h *Harness) exchange(ctx context.Context, initiator, responder *session.Ha
 		return fmt.Errorf("building request: %w", err)
 	}
 
-	if err := h.publish(ctx, h.Alice, h.Bob, protocol.TypeSessionRequest, 0, request); err != nil {
+	if err := h.publish(ctx, from, to, protocol.TypeSessionRequest, 0, request); err != nil {
 		return fmt.Errorf("publishing request: %w", err)
 	}
 
 	// Bob's policy decides before anything is committed.
-	if err := responder.ReceiveRequest(*request.Request, 0, h.Bob.Allowlist, now); err != nil {
+	if err := responder.ReceiveRequest(*request.Request, 0, to.Allowlist, now); err != nil {
 		return fmt.Errorf("receiving request: %w", err)
 	}
 
@@ -297,7 +346,7 @@ func (h *Harness) exchange(ctx context.Context, initiator, responder *session.Ha
 	if err != nil {
 		return fmt.Errorf("building offer: %w", err)
 	}
-	if err := h.publish(ctx, h.Bob, h.Alice, protocol.TypeSessionOffer, 0, offer); err != nil {
+	if err := h.publish(ctx, to, from, protocol.TypeSessionOffer, 0, offer); err != nil {
 		return fmt.Errorf("publishing offer: %w", err)
 	}
 	if err := initiator.ReceiveOffer(*offer.Offer, 0, now); err != nil {
@@ -308,7 +357,7 @@ func (h *Harness) exchange(ctx context.Context, initiator, responder *session.Ha
 	if err != nil {
 		return fmt.Errorf("building accept: %w", err)
 	}
-	if err := h.publish(ctx, h.Alice, h.Bob, protocol.TypeSessionAccept, 1, accept); err != nil {
+	if err := h.publish(ctx, from, to, protocol.TypeSessionAccept, 1, accept); err != nil {
 		return fmt.Errorf("publishing accept: %w", err)
 	}
 	if err := responder.ReceiveAccept(*accept.Accept, 1, now); err != nil {
