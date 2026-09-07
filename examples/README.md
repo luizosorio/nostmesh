@@ -40,6 +40,39 @@ here — that is a transit service with explicit consent, arriving in MVP 4.
 See the [manual tunnel tutorial](../docs/tutorial-manual-tunnel.md) for a full
 walk-through.
 
+## Asking why a peer is refused
+
+`nostmesh policy explain` reports what local policy decides about a peer, for
+every action, and which rule produced each answer:
+
+```bash
+nostmesh policy explain --config /etc/nostmesh/nostmesh.json --peer <hex pubkey>
+```
+
+```text
+session
+  outcome: allow
+  reason:  allowed_by_group
+  rule:    group my-devices
+  routes:  100.96.0.0/24
+
+route
+  outcome: deny
+  reason:  action_not_permitted
+  rule:    group my-devices
+```
+
+The distinction that matters when a peer will not connect: `rule: none matched`
+means nothing authorizes it and one has to be written, while a named rule with
+`action_not_permitted` means the rule exists and has to be widened.
+
+Add `--prefix 10.1.0.0/16` to ask what would happen if the peer announced that
+route — including a default route, which is how you see `require_confirmation`
+without waiting for one to arrive. `--json` prints the same answer for a script.
+
+It reads configuration and changes nothing, and it reports only what the
+configuration file already holds.
+
 ## The default route is a question, never an answer
 
 `accept_default_route` is `false`, and a peer announcing `0.0.0.0/0` or `::/0`

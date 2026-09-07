@@ -43,6 +43,7 @@ func commands() []command {
 		{"connect", "Negotiate a session with a peer", runConnect},
 		{"sessions", "List authorized peers and active sessions", runSessions},
 		{"disconnect", "Close a session", runDisconnect},
+		{"policy", "Explain what local policy decides", runPolicy},
 		{"relay-check", "Check real relays accept this protocol", runRelayCheck},
 	}
 }
