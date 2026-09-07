@@ -40,6 +40,22 @@ here — that is a transit service with explicit consent, arriving in MVP 4.
 See the [manual tunnel tutorial](../docs/tutorial-manual-tunnel.md) for a full
 walk-through.
 
+## The default route is a question, never an answer
+
+`accept_default_route` is `false`, and a peer announcing `0.0.0.0/0` or `::/0`
+is refused. Such a route captures all traffic — including this node's own
+transport to the peer carrying it — so installing one silently is how a node
+loses the connection it was installed over.
+
+Setting it to `true` does **not** accept a default route. It changes the answer
+from "no" to "ask a person": policy returns `require_confirmation`, which is not
+permission and never becomes permission on its own. Nothing a peer sends can
+change the setting.
+
+Routes themselves arrive in M2.4; today this decides, and
+[NM-09](../docs/adr/NM-09-routes-follow-allowed-ips.md) keeps the adapter
+refusing a default route outright regardless.
+
 ## Authorizing several identities at once
 
 `policy.groups` authorizes every identity it names with one rule. It exists for

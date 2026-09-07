@@ -103,11 +103,33 @@ type Allowlist struct {
 	// map's iteration order would make which group answered depend on nothing
 	// an operator could see.
 	groups []Group
+
+	// acceptDefaultRoute records whether the operator is willing to be asked
+	// about a default route.
+	//
+	// False by default, which is the whole point: a node that never sets it
+	// refuses one outright. Setting it does not accept anything — it turns a
+	// refusal into a question, and the question is put to a person. Nothing a
+	// peer sends can change it.
+	acceptDefaultRoute bool
 }
 
 // NewAllowlist returns an empty allowlist, which authorizes nobody.
 func NewAllowlist() *Allowlist {
 	return &Allowlist{grants: make(map[domain.NostrPublicKey]Grant)}
+}
+
+// AcceptDefaultRoute records the operator's willingness to be asked about a
+// default route.
+//
+// Local intent, set from configuration and never from anything a peer sends.
+// See DecideRoute for what it changes: a DENY becomes a REQUIRE_CONFIRMATION,
+// never an ALLOW.
+func (a *Allowlist) AcceptDefaultRoute(accept bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.acceptDefaultRoute = accept
 }
 
 // Add records a grant, replacing any existing one for the peer.

@@ -277,6 +277,11 @@ func runDisconnect(args []string, stdout, stderr *output) int {
 func loadAllowlist(cfg config.Config) (*policy.Allowlist, error) {
 	allowlist := policy.NewAllowlist()
 
+	// Local intent about a route that would capture everything, including this
+	// node's own transport to the peer carrying it. Off unless the operator
+	// said otherwise, and even on it only makes the route a question.
+	allowlist.AcceptDefaultRoute(cfg.Policy.AcceptDefaultRoute)
+
 	for _, authorized := range cfg.Policy.AuthorizedPeers {
 		peer, err := domain.ParseNostrPublicKey(authorized.PublicKey)
 		if err != nil {

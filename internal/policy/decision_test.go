@@ -329,3 +329,201 @@ func TestAnAllowNamesItsRule(t *testing.T) {
 		t.Errorf("rule = %q, want it to name the group", rule)
 	}
 }
+
+// A default route is never allowed outright, whatever the setting.
+//
+// The property that matters most here: enabling accept_default_route turns a
+// refusal into a question, and there is no configuration that turns it into
+// permission. A peer cannot reach ALLOW for 0.0.0.0/0 by any path.
+func TestADefaultRouteIsNeverAllowed(t *testing.T) {
+	peer := decisionKey(t, "a router")
+
+	for _, accept := range []bool{false, true} {
+		list := NewAllowlist()
+		list.AcceptDefaultRoute(accept)
+		if err := list.Add(Grant{
+			Peer:       peer,
+			Actions:    []Action{ActionRoute},
+			AllowedIPs: prefixes("0.0.0.0/0", "::/0", "10.0.0.0/8"),
+		}); err != nil {
+			t.Fatalf("granting: %v", err)
+		}
+
+		for _, route := range []string{"0.0.0.0/0", "::/0"} {
+			decision := list.DecideRoute(peer, netip.MustParsePrefix(route))
+			if decision.Allowed() {
+				t.Errorf("accept=%v: %s was allowed; it captures the tunnel's own endpoint", accept, route)
+			}
+			if len(decision.AllowedIPs) != 0 {
+				t.Errorf("accept=%v: %s carried limits despite not being allowed", accept, route)
+			}
+		}
+	}
+}
+
+// With the setting off a default route is refused; with it on it is a question.
+func TestAcceptDefaultRouteTurnsARefusalIntoAQuestion(t *testing.T) {
+	peer := decisionKey(t, "a router")
+
+	build := func(accept bool) Decision {
+		list := NewAllowlist()
+		list.AcceptDefaultRoute(accept)
+		if err := list.Add(Grant{
+			Peer: peer, Actions: []Action{ActionRoute}, AllowedIPs: prefixes("0.0.0.0/0"),
+		}); err != nil {
+			t.Fatalf("granting: %v", err)
+		}
+		return list.DecideRoute(peer, netip.MustParsePrefix("0.0.0.0/0"))
+	}
+
+	refused := build(false)
+	if refused.Outcome != OutcomeDeny {
+		t.Errorf("outcome = %q, want deny when the operator never opted in", refused.Outcome)
+	}
+	if refused.Reason != ReasonDefaultRouteNotAccepted {
+		t.Errorf("reason = %q, want %q", refused.Reason, ReasonDefaultRouteNotAccepted)
+	}
+
+	asked := build(true)
+	if asked.Outcome != OutcomeConfirm {
+		t.Errorf("outcome = %q, want require_confirmation once the operator opted in", asked.Outcome)
+	}
+	if asked.Reason != ReasonDefaultRouteNeedsConfirmation {
+		t.Errorf("reason = %q, want %q", asked.Reason, ReasonDefaultRouteNeedsConfirmation)
+	}
+	if asked.Allowed() {
+		t.Error("a question was treated as permission")
+	}
+}
+
+// An announcement outside the rule's limits is refused.
+func TestARouteOutsideTheRuleIsRefused(t *testing.T) {
+	peer := decisionKey(t, "a router")
+
+	list := NewAllowlist()
+	if err := list.Add(Grant{
+		Peer: peer, Actions: []Action{ActionRoute}, AllowedIPs: prefixes("10.0.0.0/8"),
+	}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+
+	decision := list.DecideRoute(peer, netip.MustParsePrefix("192.168.0.0/16"))
+	if decision.Allowed() {
+		t.Fatal("a peer routed a prefix nobody granted it")
+	}
+	if decision.Reason != ReasonPrefixNotAllowed {
+		t.Errorf("reason = %q, want %q", decision.Reason, ReasonPrefixNotAllowed)
+	}
+}
+
+// A narrower announcement inside the rule is allowed, and carries only itself.
+//
+// Containment rather than equality: a rule permitting 10.0.0.0/8 covers
+// 10.1.0.0/16, which asks for less than was granted. The decision returns the
+// announced prefix, never the wider rule — installing the rule's own prefix
+// would route more than the peer asked for.
+func TestANarrowerRouteInsideTheRuleIsAllowed(t *testing.T) {
+	peer := decisionKey(t, "a router")
+
+	list := NewAllowlist()
+	if err := list.Add(Grant{
+		Peer: peer, Actions: []Action{ActionRoute}, AllowedIPs: prefixes("10.0.0.0/8"),
+	}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+
+	announced := netip.MustParsePrefix("10.1.0.0/16")
+	decision := list.DecideRoute(peer, announced)
+	if !decision.Allowed() {
+		t.Fatalf("a prefix inside the rule was refused: %s", decision.Reason)
+	}
+	if len(decision.AllowedIPs) != 1 || decision.AllowedIPs[0] != announced {
+		t.Errorf("allowed_ips = %v, want only the announced prefix", decision.AllowedIPs)
+	}
+}
+
+// A wider announcement than the rule is refused.
+//
+// The direction that matters: 10.0.0.0/8 announced against a rule permitting
+// 10.1.0.0/16 asks for more than was granted, and overlapping is not enough.
+func TestAWiderRouteThanTheRuleIsRefused(t *testing.T) {
+	peer := decisionKey(t, "a router")
+
+	list := NewAllowlist()
+	if err := list.Add(Grant{
+		Peer: peer, Actions: []Action{ActionRoute}, AllowedIPs: prefixes("10.1.0.0/16"),
+	}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+
+	decision := list.DecideRoute(peer, netip.MustParsePrefix("10.0.0.0/8"))
+	if decision.Allowed() {
+		t.Fatal("an announcement wider than the rule was allowed")
+	}
+	if decision.Reason != ReasonPrefixNotAllowed {
+		t.Errorf("reason = %q, want %q", decision.Reason, ReasonPrefixNotAllowed)
+	}
+}
+
+// Authorization is answered before the prefix.
+//
+// A peer no rule mentions gets the same answer whatever it announces, so the
+// refusal says nothing about which prefixes this node finds interesting.
+func TestAnUnauthorizedPeerIsRefusedBeforeThePrefix(t *testing.T) {
+	list := NewAllowlist()
+	list.AcceptDefaultRoute(true)
+	stranger := decisionKey(t, "a stranger")
+
+	for _, route := range []string{"0.0.0.0/0", "10.0.0.0/8", "192.168.1.0/24"} {
+		decision := list.DecideRoute(stranger, netip.MustParsePrefix(route))
+		if decision.Outcome != OutcomeDeny {
+			t.Errorf("%s: outcome = %q, want deny", route, decision.Outcome)
+		}
+		if decision.Reason != ReasonNoRule {
+			t.Errorf("%s: reason = %q, want %q; the answer must not vary with the prefix",
+				route, decision.Reason, ReasonNoRule)
+		}
+	}
+}
+
+// A peer authorized for sessions but not routes cannot announce one.
+func TestASessionGrantDoesNotCarryRoutes(t *testing.T) {
+	peer := decisionKey(t, "a client")
+
+	list := NewAllowlist()
+	if err := list.Add(Grant{
+		Peer: peer, Actions: []Action{ActionSession}, AllowedIPs: prefixes("10.0.0.0/8"),
+	}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+
+	decision := list.DecideRoute(peer, netip.MustParsePrefix("10.0.0.0/8"))
+	if decision.Allowed() {
+		t.Fatal("a session grant let a peer announce a route")
+	}
+	if decision.Reason != ReasonActionNotPermitted {
+		t.Errorf("reason = %q, want %q", decision.Reason, ReasonActionNotPermitted)
+	}
+}
+
+// A group can authorize routes, and the default route rule still holds.
+func TestAGroupRouteStillRefusesTheDefaultRoute(t *testing.T) {
+	member := decisionKey(t, "a group router")
+
+	list := NewAllowlist()
+	if err := list.AddGroup(Group{
+		Name:       "routers",
+		Members:    []domain.NostrPublicKey{member},
+		Actions:    []Action{ActionRoute},
+		AllowedIPs: prefixes("10.0.0.0/8", "0.0.0.0/0"),
+	}); err != nil {
+		t.Fatalf("adding group: %v", err)
+	}
+
+	if decision := list.DecideRoute(member, netip.MustParsePrefix("10.1.0.0/16")); !decision.Allowed() {
+		t.Errorf("a group member was refused a permitted prefix: %s", decision.Reason)
+	}
+	if decision := list.DecideRoute(member, netip.MustParsePrefix("0.0.0.0/0")); decision.Allowed() {
+		t.Error("a group rule allowed a default route")
+	}
+}
