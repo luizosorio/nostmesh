@@ -134,4 +134,14 @@ type Controller interface {
 
 	// RemoveInterface deletes an interface, refusing one NostMesh does not own.
 	RemoveInterface(ctx context.Context, iface string) error
+
+	// ListOwnedInterfaces reports every interface NostMesh owns on this host.
+	//
+	// Reconciliation needs it: a node that ran several sessions leaves several
+	// interfaces, and cleaning up one known name would leave the rest holding
+	// their ports — which the next run would then fail to bind, forever.
+	//
+	// Only interfaces matching InterfacePrefix are returned. Something else on
+	// the host is not ours to enumerate, let alone remove.
+	ListOwnedInterfaces(ctx context.Context) ([]string, error)
 }

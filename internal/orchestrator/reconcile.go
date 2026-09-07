@@ -30,28 +30,59 @@ type Reconciliation struct {
 func (o *Orchestrator) Down(ctx context.Context) (Reconciliation, error) {
 	result := Reconciliation{}
 
-	observed, err := o.controller.ObserveInterface(ctx, defaultInterface)
-	switch {
-	case err == nil:
-		if !wireguard.OwnsInterface(observed.Name) {
-			// Cannot happen for defaultInterface, but the check is kept so the
-			// invariant holds if the interface name ever becomes configurable.
-			result.Kept = append(result.Kept, observed.Name)
-			return result, nil
-		}
-		if removeErr := o.controller.RemoveInterface(ctx, defaultInterface); removeErr != nil {
-			return result, fmt.Errorf("removing %s: %w", defaultInterface, removeErr)
-		}
-		result.Removed = append(result.Removed, defaultInterface)
+	// Enumerated rather than named. A node that ran several sessions leaves
+	// several interfaces, and removing one known name would leave the rest
+	// holding their listen ports — which the next run then fails to bind, with
+	// nothing on the host explaining why.
+	owned, err := o.controller.ListOwnedInterfaces(ctx)
+	if err != nil {
+		return result, fmt.Errorf("listing interfaces: %w", err)
+	}
 
-	case errors.Is(err, wireguard.ErrInterfaceNotFound):
-		// Nothing to remove.
-
-	default:
-		return result, fmt.Errorf("observing %s: %w", defaultInterface, err)
+	for _, name := range owned {
+		removed, err := o.removeOne(ctx, name)
+		if err != nil {
+			// Reported with what was already removed, so a partial cleanup is
+			// visible rather than looking like nothing happened.
+			return result, err
+		}
+		if removed {
+			result.Removed = append(result.Removed, name)
+			continue
+		}
+		result.Kept = append(result.Kept, name)
 	}
 
 	return o.reconcileJournal(result)
+}
+
+// removeOne removes a single interface, reporting whether it did.
+//
+// An interface that vanished between the listing and the removal is not an
+// error: something else cleaned it up, which is the outcome wanted anyway.
+func (o *Orchestrator) removeOne(ctx context.Context, name string) (bool, error) {
+	observed, err := o.controller.ObserveInterface(ctx, name)
+	switch {
+	case errors.Is(err, wireguard.ErrInterfaceNotFound):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("observing %s: %w", name, err)
+	}
+
+	// Checked again after observing, rather than trusting the listing. The two
+	// are separate calls, and an interface renamed between them must not be
+	// removed on the strength of the name it used to have.
+	if !wireguard.OwnsInterface(observed.Name) {
+		return false, nil
+	}
+
+	if err := o.controller.RemoveInterface(ctx, name); err != nil {
+		if errors.Is(err, wireguard.ErrInterfaceNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("removing %s: %w", name, err)
+	}
+	return true, nil
 }
 
 // reconcileJournal closes out interrupted transactions.
@@ -110,19 +141,22 @@ func (o *Orchestrator) Recover(ctx context.Context) (Reconciliation, error) {
 	// A partially applied transaction leaves the host in a state no plan
 	// describes. Removing what NostMesh owns returns it to a known baseline,
 	// from which a fresh Up can be applied cleanly.
-	observed, err := o.controller.ObserveInterface(ctx, defaultInterface)
-	switch {
-	case err == nil && wireguard.OwnsInterface(observed.Name):
-		if removeErr := o.controller.RemoveInterface(ctx, defaultInterface); removeErr != nil {
-			return result, fmt.Errorf("removing partial state on %s: %w", defaultInterface, removeErr)
+	//
+	// Every owned interface, not one: an interrupted run may have created
+	// several, and the transaction that died says nothing about the others.
+	owned, err := o.controller.ListOwnedInterfaces(ctx)
+	if err != nil {
+		return result, fmt.Errorf("listing interfaces: %w", err)
+	}
+
+	for _, name := range owned {
+		removed, err := o.removeOne(ctx, name)
+		if err != nil {
+			return result, fmt.Errorf("removing partial state: %w", err)
 		}
-		result.Removed = append(result.Removed, defaultInterface)
-
-	case errors.Is(err, wireguard.ErrInterfaceNotFound):
-		// The transaction died before the interface existed.
-
-	case err != nil:
-		return result, fmt.Errorf("observing %s: %w", defaultInterface, err)
+		if removed {
+			result.Removed = append(result.Removed, name)
+		}
 	}
 
 	return o.reconcileJournal(result)

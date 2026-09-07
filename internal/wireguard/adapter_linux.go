@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -340,6 +341,39 @@ func (a *LinuxAdapter) removePeerRoutes(iface string, publicKey domain.WireGuard
 		}
 	}
 	return nil
+}
+
+// ListOwnedInterfaces reports every WireGuard interface this project owns.
+//
+// It asks wgctrl for the devices rather than dumping every link on the host:
+// the question is which WireGuard interfaces exist, and a link dump would also
+// return every bridge, tap and physical NIC for this to filter.
+//
+// Ownership is by prefix. An interface somebody else created and happened to
+// name similarly would be claimed, which is the same exposure RemoveInterface
+// already accepts and the reason the prefix is distinctive.
+func (a *LinuxAdapter) ListOwnedInterfaces(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	devices, err := a.client.Devices()
+	if err != nil {
+		return nil, fmt.Errorf("listing wireguard interfaces: %w", err)
+	}
+
+	owned := make([]string, 0, len(devices))
+	for _, device := range devices {
+		if OwnsInterface(device.Name) {
+			owned = append(owned, device.Name)
+		}
+	}
+
+	// Sorted so that reconciliation is deterministic: two runs over the same
+	// host must remove things in the same order, or a partial failure would
+	// leave a different remainder each time.
+	slices.Sort(owned)
+	return owned, nil
 }
 
 // ObserveInterface reports what the kernel says about an interface.

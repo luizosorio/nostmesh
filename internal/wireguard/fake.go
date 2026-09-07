@@ -313,6 +313,30 @@ func (f *FakeController) ObserveInterface(_ context.Context, name string) (Inter
 	return observed, nil
 }
 
+// ListOwnedInterfaces reports the simulated interfaces this project owns.
+//
+// Sorted and prefix-filtered like the netlink adapter, because a fake that
+// answered in map order would let a caller depend on an order the kernel does
+// not promise — and the divergence would only show against a real host.
+func (f *FakeController) ListOwnedInterfaces(_ context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.record("ListOwnedInterfaces"); err != nil {
+		return nil, err
+	}
+
+	owned := make([]string, 0, len(f.interfaces))
+	for name := range f.interfaces {
+		if OwnsInterface(name) {
+			owned = append(owned, name)
+		}
+	}
+
+	slices.Sort(owned)
+	return owned, nil
+}
+
 // RemoveInterface deletes a simulated interface, refusing one not owned.
 func (f *FakeController) RemoveInterface(_ context.Context, name string) error {
 	f.mu.Lock()
