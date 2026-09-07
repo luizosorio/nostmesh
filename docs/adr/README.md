@@ -50,3 +50,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-21](NM-21-overlay-addressing-and-network-manifest.md) | Overlay addressing and the network manifest | Accepted |
 | [NM-22](NM-22-logging-and-diagnostics.md) | Logging and diagnostics | Accepted |
 | [NM-23](NM-23-pinning-external-versions.md) | Pinning external versions | Accepted |
+| [NM-24](NM-24-policy-decisions-carry-limits.md) | Policy decisions carry limits | Accepted |
