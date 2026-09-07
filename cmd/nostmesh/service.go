@@ -42,9 +42,10 @@ type service struct {
 	mu      sync.Mutex
 	workers map[domain.NostrPublicKey]*peerWorker
 
-	// answered is shared by every worker and outlives their attempts, so a
-	// session answered once is not answered again on the next poll.
-	answered *orchestrator.AnsweredSessions
+	// super owns what every session shares: the netlink handle and the one
+	// session table. Sharing them is what makes max_sessions count across peers
+	// rather than within one attempt.
+	super *supervisor
 
 	// noticesSent counts revocation notices attempted. A test asserting the
 	// boundary needs to see the decision, not guess at it from how long a
@@ -234,17 +235,27 @@ func runServe(args []string, stdout, stderr *output) int {
 	}
 	defer func() { _ = logFile.Close() }()
 
+	// Opened once and closed at shutdown. Every session shares the netlink
+	// handle and the session table; a handle per attempt is what stopped
+	// max_sessions from ever counting more than one.
+	super, err := newSupervisor(cfg, logger)
+	if err != nil {
+		stderr.printf("nostmesh serve: %v\n", err)
+		return exitError
+	}
+	defer func() { _ = super.Close() }()
+
 	svc := &service{
 		cfg: cfg,
 
 		// Tagged with the component that emits it: a line saying a session
 		// failed without saying which layer observed the failure sends its
 		// reader to the wrong place.
-		log:      observability.Component(logger, observability.ComponentService),
-		self:     identity.PublicKey(),
-		config:   path,
-		workers:  make(map[domain.NostrPublicKey]*peerWorker),
-		answered: orchestrator.NewAnsweredSessions(time.Now),
+		log:     observability.Component(logger, observability.ComponentService),
+		self:    identity.PublicKey(),
+		config:  path,
+		workers: make(map[domain.NostrPublicKey]*peerWorker),
+		super:   super,
 	}
 
 	return svc.run(stdout)
@@ -430,7 +441,7 @@ func (s *service) start(ctx context.Context, cfg config.Config, peer domain.Nost
 		observability.Event("peer.added"),
 		slog.Any("actions", actionNames(grant.Actions)))
 
-	go worker.run(workerCtx, cfg, s.answered)
+	go worker.run(workerCtx, cfg, s.super)
 }
 
 // stop tears a worker down and waits for it to exit.
@@ -535,7 +546,7 @@ func (s *service) stopAll() {
 }
 
 // run holds a session with one peer for as long as the worker lives.
-func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orchestrator.AnsweredSessions) {
+func (w *peerWorker) run(ctx context.Context, cfg config.Config, super *supervisor) {
 	defer close(w.done)
 
 	w.log.Info("worker started", observability.Event("peer.worker.started"))
@@ -556,7 +567,7 @@ func (w *peerWorker) run(ctx context.Context, cfg config.Config, answered *orche
 
 		started := time.Now()
 		w.observe("connecting", "", attempt)
-		err := w.attempt(ctx, cfg, answered, role)
+		err := w.attempt(ctx, cfg, super, role)
 		role = roleAfter(err)
 
 		switch {
@@ -665,9 +676,9 @@ func roleAfter(err error) orchestrator.Role {
 
 // attempt builds a runtime and drives one session.
 func (w *peerWorker) attempt(ctx context.Context, cfg config.Config,
-	answered *orchestrator.AnsweredSessions, role orchestrator.Role,
+	super *supervisor, role orchestrator.Role,
 ) error {
-	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, w.log, answered)
+	runtime, err := buildSessionRuntime(ctx, cfg, w.peer, negotiationBound, w.log, super)
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
@@ -21,12 +20,15 @@ func testService(t *testing.T, cfg config.Config, path string) *service {
 	t.Helper()
 
 	return &service{
-		cfg:      cfg,
-		log:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		self:     testNostrKey(t, 1),
-		config:   path,
-		workers:  make(map[domain.NostrPublicKey]*peerWorker),
-		answered: orchestrator.NewAnsweredSessions(time.Now),
+		cfg:     cfg,
+		log:     slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		self:    testNostrKey(t, 1),
+		config:  path,
+		workers: make(map[domain.NostrPublicKey]*peerWorker),
+
+		// A supervisor over a fake controller: these tests exercise worker
+		// lifecycle, which needs the shared table but not a kernel.
+		super: testSupervisor(t),
 	}
 }
 
