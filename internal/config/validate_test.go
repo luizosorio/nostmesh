@@ -263,6 +263,62 @@ func TestValidateRejects(t *testing.T) {
 			wantField: "policy.max_sessions",
 		},
 		{
+			name:      "a group without a name",
+			mutate:    func(c *Config) { c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.Name = "" })} },
+			wantField: "policy.groups[0].name",
+		},
+		{
+			name: "two groups sharing a name",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{validPolicyGroup(), validPolicyGroup()}
+			},
+			wantField: "policy.groups[1].name",
+		},
+		{
+			name: "a group with no members",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.Members = nil })}
+			},
+			wantField: "policy.groups[0].members",
+		},
+		{
+			name: "a member that is not a Nostr key",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.Members = []string{"not-a-key"} })}
+			},
+			wantField: "policy.groups[0].members[0]",
+		},
+		{
+			name: "the same member listed twice",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) {
+					g.Members = []string{testGroupMember, testGroupMember}
+				})}
+			},
+			wantField: "policy.groups[0].members[1]",
+		},
+		{
+			name: "a group with no actions",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.Actions = nil })}
+			},
+			wantField: "policy.groups[0].actions",
+		},
+		{
+			name: "a group action outside the closed set",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.Actions = []string{"everything"} })}
+			},
+			wantField: "policy.groups[0].actions[0]",
+		},
+		{
+			name: "a group prefix that is not a prefix",
+			mutate: func(c *Config) {
+				c.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) { g.AllowedIPs = []string{"not-a-prefix"} })}
+			},
+			wantField: "policy.groups[0].allowed_ips[0]",
+		},
+		{
 			name:      "empty peer name",
 			mutate:    func(c *Config) { c.Peers[0].Name = "" },
 			wantField: "peers[0].name",
@@ -463,5 +519,58 @@ func TestObserverValidation(t *testing.T) {
 				t.Errorf("expected the observers to validate, got: %v", err)
 			}
 		})
+	}
+}
+
+// testGroupMember is a Nostr identity for group fixtures, derived rather than
+// written out for the reason given above testPeerKey.
+var testGroupMember = derivedHex("nostmesh config test group member")
+
+func validPolicyGroup() PolicyGroup {
+	return PolicyGroup{
+		Name:       "my-devices",
+		Members:    []string{testGroupMember},
+		Actions:    []string{"session"},
+		AllowedIPs: []string{"100.96.0.0/24"},
+	}
+}
+
+// mutatedGroup returns a valid group with one field changed, so a failure is
+// attributable to that field alone.
+func mutatedGroup(mutate func(*PolicyGroup)) PolicyGroup {
+	group := validPolicyGroup()
+	mutate(&group)
+	return group
+}
+
+// A group rule is accepted, which is what makes every rejection above mean
+// something: without this the table could be passing because groups are refused
+// wholesale.
+func TestValidateAcceptsAGroupRule(t *testing.T) {
+	cfg := validConfig()
+	cfg.Policy.Groups = []PolicyGroup{validPolicyGroup()}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a well-formed group was refused: %v", err)
+	}
+}
+
+// A group prefix is checked by validation, unlike an authorized peer's.
+//
+// The asymmetry is deliberate and worth pinning: a malformed prefix on a peer
+// is only found when the grant is built, which fails a whole reload for one bad
+// line. A group says which field is wrong before anything is loaded.
+func TestAGroupPrefixIsCheckedBeforeLoading(t *testing.T) {
+	cfg := validConfig()
+	cfg.Policy.Groups = []PolicyGroup{mutatedGroup(func(g *PolicyGroup) {
+		g.AllowedIPs = []string{"100.96.0.0/24", "10.0.0.0/8", "not-a-prefix"}
+	})}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a malformed prefix was accepted; the reload would fail instead")
+	}
+	if !strings.Contains(err.Error(), "policy.groups[0].allowed_ips[2]") {
+		t.Errorf("the error does not name the offending prefix: %v", err)
 	}
 }

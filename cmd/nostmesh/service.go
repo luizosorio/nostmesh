@@ -384,14 +384,23 @@ func (s *service) reconcile(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 
-	wanted := make(map[domain.NostrPublicKey]policy.Grant)
-	for _, grant := range allowlist.Grants() {
-		if allowlist.Check(grant.Peer, policy.ActionSession) != nil {
-			// Revoked, or not granted a session. Either way this node will not
-			// hold one with it.
-			continue
+	// Every identity policy would hold a session with, group members included.
+	// sessionPeers asks the decision rather than reading the rules, so a peer
+	// covered only by a group is served and a revoked one is not.
+	wanted := make(map[domain.NostrPublicKey]servedPeer)
+	for _, peer := range sessionPeers(allowlist) {
+		// A group member has no rule of its own, so the alias stays empty and
+		// the worker is labelled by its key. That is honest: the operator named
+		// the group, not this device.
+		grant, _ := allowlist.Grant(peer)
+		grant.Peer = peer
+		if len(grant.Actions) == 0 {
+			grant.Actions = []policy.Action{policy.ActionSession}
 		}
-		wanted[grant.Peer] = grant
+		wanted[peer] = servedPeer{
+			grant: grant,
+			rule:  allowlist.Decide(peer, policy.ActionSession).Rule,
+		}
 	}
 
 	s.mu.Lock()
@@ -413,13 +422,13 @@ func (s *service) reconcile(ctx context.Context, cfg config.Config) error {
 		stopped++
 	}
 
-	for peer, grant := range wanted {
+	for peer, served := range wanted {
 		if _, already := running[peer]; already {
 			// A healthy tunnel is left alone: reloading must not disturb what
 			// it did not change.
 			continue
 		}
-		s.start(ctx, cfg, peer, grant)
+		s.start(ctx, cfg, peer, served)
 		started++
 	}
 
@@ -432,8 +441,19 @@ func (s *service) reconcile(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
+// servedPeer is one identity this node will hold a session with, and why.
+//
+// The rule travels with the grant because a group member has no grant naming
+// it: without this, an operator reading the log could see the peer start and
+// have nothing to say which rule admitted it.
+type servedPeer struct {
+	grant policy.Grant
+	rule  string
+}
+
 // start launches a worker for one peer.
-func (s *service) start(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey, grant policy.Grant) {
+func (s *service) start(ctx context.Context, cfg config.Config, peer domain.NostrPublicKey, served servedPeer) {
+	grant := served.grant
 	workerCtx, cancel := context.WithCancel(ctx)
 
 	worker := &peerWorker{
@@ -452,6 +472,7 @@ func (s *service) start(ctx context.Context, cfg config.Config, peer domain.Nost
 
 	worker.log.Info("peer authorized",
 		observability.Event("peer.added"),
+		slog.String("rule", served.rule),
 		slog.Any("actions", actionNames(grant.Actions)))
 
 	go worker.run(workerCtx, cfg, s.super)

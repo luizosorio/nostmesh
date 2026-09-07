@@ -162,6 +162,42 @@ type Policy struct {
 	// nobody is authorized: a valid signature proves who is asking, not that
 	// they may.
 	AuthorizedPeers []AuthorizedPeer `toml:"authorized_peers" json:"authorized_peers,omitempty"`
+
+	// Groups authorize several identities with one rule.
+	//
+	// A rule per pubkey is right when each peer is a separate judgement. For a
+	// set of devices that are all trusted the same way it is ceremony: the tenth
+	// rule carries no more intent than the first, and the repetition is where an
+	// operator makes a mistake.
+	//
+	// This does not relax the default. A group is a shorter way to say who is
+	// trusted, never a way to skip saying it, and a peer no group names is still
+	// refused. See NM-24.
+	Groups []PolicyGroup `toml:"groups" json:"groups,omitempty"`
+}
+
+// PolicyGroup authorizes every identity it names.
+//
+// Members are listed here rather than taken from a network manifest. NM-24
+// describes a group as a manifest's membership, which is the direction, but the
+// manifest is not yet wired into the service — so today the operator writes the
+// members and the rule tracks exactly what they wrote.
+type PolicyGroup struct {
+	// Name identifies the group in a rule and in an explanation. It is a local
+	// label and carries no authority, like an alias.
+	Name string `toml:"name" json:"name"`
+
+	// Members are the Nostr identities the rule covers, hex-encoded.
+	Members []string `toml:"members" json:"members"`
+
+	// Actions lists what members may do: session, route, transit.
+	Actions []string `toml:"actions" json:"actions"`
+
+	// AllowedIPs lists the prefixes this node will accept from a member.
+	//
+	// Local intent, exactly as in AuthorizedPeer: the same prefixes for everyone
+	// the group covers.
+	AllowedIPs []string `toml:"allowed_ips" json:"allowed_ips,omitempty"`
 }
 
 // AuthorizedPeer grants a peer permission to act.
