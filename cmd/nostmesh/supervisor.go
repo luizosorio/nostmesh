@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
@@ -52,13 +54,34 @@ type supervisor struct {
 	// not answered twice.
 	answered *orchestrator.AnsweredSessions
 
-	// mu guards the slot table below.
+	// mu guards the slot table and the attempt counter below.
 	mu sync.Mutex
 
 	// slots records which interface and port each peer holds, so two peers
 	// cannot be handed the same pair.
 	slots map[domain.NostrPublicKey]peerSlot
+
+	// attempting counts sessions currently negotiating.
+	//
+	// Separate from the session table's own limit, which counts sessions that
+	// reached it. A node with many authorized peers starts every worker at once
+	// on a restart, and each negotiation holds a socket, relay connections and a
+	// STUN query before any of them is a session — so without a bound the burst
+	// is largest exactly when the host has the least state to work from.
+	attempting int
+
+	// maxAttempting bounds that burst.
+	maxAttempting int
+
+	// clock is injectable so expiry is testable without waiting.
+	clock func() time.Time
 }
+
+// ErrTooManyAttempts reports a negotiation refused for backpressure.
+//
+// A distinct error because it is not a failure of the peer or the path: the
+// worker should come back rather than report the peer unreachable.
+var ErrTooManyAttempts = errors.New("too many sessions are negotiating")
 
 // newSupervisor opens what the sessions share.
 //
@@ -85,6 +108,15 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		return nil, err
 	}
 
+	// Derived from the session limit rather than configured separately: the
+	// operator already said how many sessions this node should hold, and a
+	// second number for how many may negotiate at once is a knob nobody would
+	// know how to set. Negotiations outnumber sessions briefly, since some fail.
+	maxAttempting := cfg.Policy.MaxSessions
+	if maxAttempting <= 0 {
+		maxAttempting = defaultMaxSessions
+	}
+
 	return &supervisor{
 		log:             log,
 		controller:      controller,
@@ -93,7 +125,82 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		netstate:        netManager,
 		answered:        orchestrator.NewAnsweredSessions(clock.Now),
 		slots:           make(map[domain.NostrPublicKey]peerSlot),
+		maxAttempting:   maxAttempting,
+		clock:           clock.Now,
 	}, nil
+}
+
+// defaultMaxSessions mirrors the session manager's own default, so a node with
+// no policy configured bounds negotiations the same way it bounds sessions.
+const defaultMaxSessions = 64
+
+// BeginAttempt reserves a negotiation slot.
+//
+// Refused rather than queued: a worker that is told to wait retries on its own
+// backoff, which spreads the burst without this having to hold anything.
+func (s *supervisor) BeginAttempt() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.attempting >= s.maxAttempting {
+		return fmt.Errorf("%w: %d already negotiating", ErrTooManyAttempts, s.attempting)
+	}
+	s.attempting++
+	return nil
+}
+
+// EndAttempt releases a negotiation slot.
+//
+// Deliberately tolerant of being called without a matching Begin: a caller that
+// deferred it before checking the error would otherwise drive the count
+// negative, and a count that can go negative eventually lets everything through.
+func (s *supervisor) EndAttempt() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.attempting > 0 {
+		s.attempting--
+	}
+}
+
+// Attempting reports how many negotiations are in flight.
+func (s *supervisor) Attempting() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.attempting
+}
+
+// ExpireStaleSessions closes sessions that never finished negotiating.
+//
+// A session left in the table holds a peer's entry, and the next Begin for that
+// peer is refused as a duplicate — so a negotiation killed between Begin and
+// establish would lock its own peer out until the process restarted. An
+// established session is never touched here: the hold decides when one of those
+// ends, from the data plane rather than from a clock.
+func (s *supervisor) ExpireStaleSessions(after time.Duration) int {
+	cutoff := s.clock().Add(-after)
+
+	var expired int
+	for _, state := range s.manager.List() {
+		if state.IsEstablished() || !state.StartedAt.Before(cutoff) {
+			continue
+		}
+
+		if err := s.manager.Close(state.Peer); err != nil {
+			continue
+		}
+		expired++
+
+		s.log.Warn("session expired before establishing",
+			observability.Event("session.expired"),
+			observability.Peer(state.Peer),
+			observability.Result(observability.ResultTimeout),
+			observability.Reason(observability.ReasonTimeout),
+			slog.String("phase", string(state.Phase)))
+	}
+
+	return expired
 }
 
 // Close releases the shared handle.

@@ -2,9 +2,11 @@ package main
 
 import (
 	"crypto/rand"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/netstate"
@@ -41,6 +43,8 @@ func testSupervisor(t *testing.T) *supervisor {
 		netstate:        netstate.NewManager(controller, journal, clock),
 		answered:        orchestrator.NewAnsweredSessions(clock.Now),
 		slots:           make(map[domain.NostrPublicKey]peerSlot),
+		maxAttempting:   4,
+		clock:           clock.Now,
 	}
 }
 
@@ -228,4 +232,142 @@ func TestTheSharedTableOutlivesAnAttempt(t *testing.T) {
 	// And closing twice is not an error: an attempt ending after the session
 	// was already gone is ordinary.
 	super.CloseSession(peer)
+}
+
+// Negotiations are bounded, and the bound is not the session limit.
+//
+// A node restarting with many authorized peers starts every worker at once.
+// Each negotiation holds a socket, relay connections and a STUN query before it
+// is a session, so the burst is largest exactly when the host has least state to
+// work from.
+func TestNegotiationsAreBounded(t *testing.T) {
+	super := testSupervisor(t) // limit of 4
+
+	for i := range 4 {
+		if err := super.BeginAttempt(); err != nil {
+			t.Fatalf("attempt %d was refused below the bound: %v", i, err)
+		}
+	}
+
+	if err := super.BeginAttempt(); !errors.Is(err, ErrTooManyAttempts) {
+		t.Errorf("the fifth attempt was allowed past a bound of 4: %v", err)
+	}
+}
+
+// Ending an attempt frees the slot.
+func TestEndingAnAttemptFreesTheSlot(t *testing.T) {
+	super := testSupervisor(t)
+
+	for range 4 {
+		if err := super.BeginAttempt(); err != nil {
+			t.Fatalf("beginning: %v", err)
+		}
+	}
+
+	super.EndAttempt()
+
+	if err := super.BeginAttempt(); err != nil {
+		t.Errorf("a freed slot was not reusable: %v", err)
+	}
+}
+
+// The counter cannot go negative.
+//
+// A caller that deferred EndAttempt before checking BeginAttempt's error would
+// otherwise drive it below zero, and a count that can go negative eventually
+// lets everything through — the bound would silently stop existing.
+func TestTheAttemptCounterCannotGoNegative(t *testing.T) {
+	super := testSupervisor(t)
+
+	for range 10 {
+		super.EndAttempt()
+	}
+
+	if got := super.Attempting(); got != 0 {
+		t.Fatalf("the counter reads %d after unmatched releases", got)
+	}
+
+	// And the bound still holds afterwards.
+	for i := range 4 {
+		if err := super.BeginAttempt(); err != nil {
+			t.Fatalf("attempt %d refused: %v", i, err)
+		}
+	}
+	if err := super.BeginAttempt(); !errors.Is(err, ErrTooManyAttempts) {
+		t.Error("the bound stopped holding after unmatched releases")
+	}
+}
+
+// A session that never established is expired.
+//
+// It holds its peer's entry in the table, and the next attempt for that peer is
+// refused as a duplicate — so a negotiation killed partway would lock its own
+// peer out until the process restarted.
+func TestAStaleSessionIsExpired(t *testing.T) {
+	super := testSupervisor(t)
+	peer := testNostrKey(t, 7)
+
+	now := time.Now()
+	super.clock = func() time.Time { return now }
+
+	id, err := domain.NewSessionID(rand.Reader)
+	if err != nil {
+		t.Fatalf("building session id: %v", err)
+	}
+	if _, err := super.manager.Begin(peer, id); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+
+	// Not yet old enough.
+	if expired := super.ExpireStaleSessions(time.Hour); expired != 0 {
+		t.Errorf("a fresh session was expired")
+	}
+
+	// Now it is.
+	now = now.Add(2 * time.Hour)
+	if expired := super.ExpireStaleSessions(time.Hour); expired != 1 {
+		t.Fatalf("expired %d sessions, want 1", expired)
+	}
+
+	// And the peer can open a new one, which is the whole point.
+	next, err := domain.NewSessionID(rand.Reader)
+	if err != nil {
+		t.Fatalf("building session id: %v", err)
+	}
+	if _, err := super.manager.Begin(peer, next); err != nil {
+		t.Errorf("the peer is still locked out after its stale session expired: %v", err)
+	}
+}
+
+// An established session is never expired by the clock.
+//
+// The hold decides when one of those ends, from the data plane. A tunnel
+// carrying traffic for hours is working, not stale, and a sweep that closed it
+// would tear down exactly the sessions the node exists to keep.
+func TestAnEstablishedSessionIsNeverExpired(t *testing.T) {
+	super := testSupervisor(t)
+	peer := testNostrKey(t, 7)
+
+	now := time.Now()
+	super.clock = func() time.Time { return now }
+
+	id, err := domain.NewSessionID(rand.Reader)
+	if err != nil {
+		t.Fatalf("building session id: %v", err)
+	}
+	if _, err := super.manager.Begin(peer, id); err != nil {
+		t.Fatalf("beginning: %v", err)
+	}
+	if err := super.manager.AdvancePhase(peer, orchestrator.PhaseEstablished); err != nil {
+		t.Fatalf("advancing: %v", err)
+	}
+
+	now = now.Add(30 * 24 * time.Hour)
+
+	if expired := super.ExpireStaleSessions(time.Hour); expired != 0 {
+		t.Error("an established session was expired by the clock")
+	}
+	if len(super.Sessions()) != 1 {
+		t.Error("the established session is gone from the table")
+	}
 }
