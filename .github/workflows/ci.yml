@@ -99,9 +99,14 @@ jobs:
 
       # Strong copyleft propagates its terms to the combined work, which would
       # conflict with the project's goal of unrestricted commercial use.
+      # Pinned to an exact version, like every other external thing this workflow
+      # pulls. The tool decides whether a dependency's license is acceptable and
+      # that answer gates the build: a new release classifying a license
+      # differently would change the outcome with no commit explaining why. See
+      # NM-23.
       - name: Check dependency licenses
         run: |
-          go install github.com/google/go-licenses@latest
+          go install github.com/google/go-licenses@v1.6.0
           go-licenses check ./... \
             --disallowed_types=forbidden,restricted,reciprocal
 

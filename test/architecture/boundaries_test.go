@@ -479,6 +479,44 @@ func TestLogEventsUseTheAttributeConstructor(t *testing.T) {
 	}
 }
 
+// TestWorkflowsPinEverythingTheyInstall keeps CI reproducible.
+//
+// A tool fetched as "@latest" is a build that can change without a commit. The
+// project pins modules by version, the toolchain by patch, Actions by commit SHA
+// and images by digest; a `go install ...@latest` slips past all of it, and the
+// day it matters is the day upstream changes something.
+//
+// This is cheap to reintroduce and invisible until it bites, which is exactly
+// the kind of rule worth enforcing rather than remembering. See NM-23.
+func TestWorkflowsPinEverythingTheyInstall(t *testing.T) {
+	root := repoRoot(t)
+	workflows := filepath.Join(root, ".github", "workflows")
+
+	entries, err := os.ReadDir(workflows)
+	if err != nil {
+		t.Skipf("no workflows to check: %v", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yml") {
+			continue
+		}
+
+		content, readErr := os.ReadFile(filepath.Join(workflows, entry.Name()))
+		if readErr != nil {
+			t.Fatalf("reading %s: %v", entry.Name(), readErr)
+		}
+
+		for i, line := range strings.Split(string(content), "\n") {
+			if strings.Contains(line, "@latest") || strings.Contains(line, "@master") {
+				t.Errorf(".github/workflows/%s:%d installs from a moving reference; "+
+					"pin an exact version so a build cannot change without a commit (see NM-23)",
+					entry.Name(), i+1)
+			}
+		}
+	}
+}
+
 // TestSessionsShareOneTable keeps the session table shared.
 //
 // A SessionManager built inside the per-attempt wiring holds exactly one
