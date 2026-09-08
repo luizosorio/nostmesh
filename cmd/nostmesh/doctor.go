@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/luizosorio/nostmesh/internal/config"
+	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
 	"github.com/luizosorio/nostmesh/internal/protocol"
@@ -65,6 +67,7 @@ func runDoctor(args []string, stdout, stderr *output) int {
 			checkJournal(cfg),
 			checkPeers(cfg),
 			checkAuthorizedPeers(cfg),
+			checkAdvertisedRoutes(cfg),
 			checkRelays(cfg),
 			checkClock(cfg),
 		)
@@ -176,6 +179,53 @@ func checkAuthorizedPeers(cfg config.Config) checkResult {
 		}
 		return checkResult{"authorized peers", statusOK, detail}
 	}
+}
+
+// checkAdvertisedRoutes reports what this node offers, and what would refuse it.
+//
+// A prefix a peer will refuse is worse than one nobody configured: the operator
+// believes the subnet is reachable, the announcement goes out, and every
+// receiver drops it for a reason this node never sees. Catching it here is the
+// difference between a diagnosis and a support thread.
+//
+// The refusals mirrored are the ones a receiver applies whatever its policy
+// (NM-25) — a prefix that could not be a destination at all. Whether a
+// particular peer *will* accept it is that peer's decision and not knowable
+// from here.
+func checkAdvertisedRoutes(cfg config.Config) checkResult {
+	if len(cfg.Routes.Advertise) == 0 {
+		return checkResult{"advertised routes", statusOK,
+			"none; this node offers no subnets to its peers"}
+	}
+
+	// The node's own addresses, so a prefix that would capture them is caught.
+	// Not the transport endpoints: those are discovered per session and unknown
+	// to a command that reads configuration.
+	local := domain.LocalNetwork{}
+	for _, peer := range cfg.Peers {
+		if prefix, err := netip.ParsePrefix(peer.OverlayAddress); err == nil {
+			local.Prefixes = append(local.Prefixes, prefix)
+		}
+	}
+
+	var refused []string
+	for _, raw := range cfg.Routes.Advertise {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			refused = append(refused, fmt.Sprintf("%s is not a prefix", raw))
+			continue
+		}
+		if err := domain.AdmitRoute(prefix, local); err != nil {
+			refused = append(refused, fmt.Sprintf("%s would be refused: %v", raw, err))
+		}
+	}
+
+	if len(refused) > 0 {
+		return checkResult{"advertised routes", statusError, strings.Join(refused, "; ")}
+	}
+
+	return checkResult{"advertised routes", statusOK,
+		fmt.Sprintf("%d offered to peers", len(cfg.Routes.Advertise))}
 }
 
 // checkRelays reports the configured relay set.
