@@ -364,3 +364,99 @@ func TestCancellationStopsGathering(t *testing.T) {
 		t.Error("a cancelled context must not produce candidates")
 	}
 }
+
+// Observers that disagree produce a candidate each.
+//
+// A provider that presents more than one public address gives different
+// observers different answers, and each is a mapping that may be the live one.
+// Keeping only the first leaves the peer probing an address the NAT may no
+// longer hold — which is the whole of #58.
+func TestDisagreeingObserversProduceACandidateEach(t *testing.T) {
+	observer := &fakeObserver{
+		responses: map[string]netip.AddrPort{
+			"stun-a.invalid:3478": netip.MustParseAddrPort("198.51.100.10:51820"),
+			"stun-b.invalid:3478": netip.MustParseAddrPort("198.51.100.11:51820"),
+		},
+	}
+
+	gatherer := testGatherer(t, GatherPolicy{
+		Order:     []Method{MethodObserver},
+		Observers: []string{"stun-a.invalid:3478", "stun-b.invalid:3478"},
+	}, &fakeInterfaces{}, observer)
+
+	result := gatherer.Gather(context.Background(), 51820)
+
+	if len(result.Candidates) != 2 {
+		t.Fatalf("candidates = %d, want one per distinct address: %v",
+			len(result.Candidates), result.Candidates)
+	}
+
+	addresses := map[string]bool{}
+	for _, candidate := range result.Candidates {
+		addresses[candidate.Address.String()] = true
+	}
+	for _, want := range []string{"198.51.100.10:51820", "198.51.100.11:51820"} {
+		if !addresses[want] {
+			t.Errorf("candidate for %s is missing; the peer cannot try it", want)
+		}
+	}
+}
+
+// Observers that agree produce one candidate.
+//
+// The ordinary case. Two entries for one address would have the peer probe the
+// same place twice and learn nothing the second time.
+func TestAgreeingObserversProduceOneCandidate(t *testing.T) {
+	same := netip.MustParseAddrPort("198.51.100.10:51820")
+	observer := &fakeObserver{
+		responses: map[string]netip.AddrPort{
+			"stun-a.invalid:3478": same,
+			"stun-b.invalid:3478": same,
+			"stun-c.invalid:3478": same,
+		},
+	}
+
+	gatherer := testGatherer(t, GatherPolicy{
+		Order: []Method{MethodObserver},
+		Observers: []string{
+			"stun-a.invalid:3478", "stun-b.invalid:3478", "stun-c.invalid:3478",
+		},
+	}, &fakeInterfaces{}, observer)
+
+	result := gatherer.Gather(context.Background(), 51820)
+
+	if len(result.Candidates) != 1 {
+		t.Errorf("candidates = %d, want one for a single agreed address: %v",
+			len(result.Candidates), result.Candidates)
+	}
+
+	// Every observer is still asked: stopping at the first would mean never
+	// noticing that the second disagrees.
+	if len(observer.queried) != 3 {
+		t.Errorf("queried %d observers, want all three; disagreement is only "+
+			"visible if every observer is asked", len(observer.queried))
+	}
+}
+
+// An observer that fails does not stop the others.
+func TestAFailingObserverDoesNotHideTheRest(t *testing.T) {
+	observer := &fakeObserver{
+		responses: map[string]netip.AddrPort{
+			"stun-b.invalid:3478": netip.MustParseAddrPort("198.51.100.11:51820"),
+		},
+		failures: map[string]error{
+			"stun-a.invalid:3478": errors.New("timeout"),
+		},
+	}
+
+	gatherer := testGatherer(t, GatherPolicy{
+		Order:     []Method{MethodObserver},
+		Observers: []string{"stun-a.invalid:3478", "stun-b.invalid:3478"},
+	}, &fakeInterfaces{}, observer)
+
+	result := gatherer.Gather(context.Background(), 51820)
+
+	if len(result.Candidates) != 1 {
+		t.Errorf("candidates = %d, want the one that answered", len(result.Candidates))
+	}
+}
