@@ -1,0 +1,70 @@
+# Package metadata for .deb and .rpm, built by nfpm.
+#
+# One description for both formats: the two differ in how they are built, not in
+# what NostMesh installs. Architecture and version arrive from the environment
+# so a single file serves every build the release workflow makes.
+name: nostmesh
+arch: ${PKG_ARCH}
+version: ${PKG_VERSION}
+section: net
+priority: optional
+maintainer: NostMesh maintainers <noreply@users.noreply.github.com>
+description: |
+  Decentralized overlay network using Nostr for discovery and WireGuard for
+  transport.
+  .
+  NostMesh nodes find each other through Nostr relays, negotiate a session over
+  encrypted control messages, and carry traffic through the kernel's WireGuard.
+  Every effect on the host is decided by local policy: nothing a peer sends
+  configures this machine directly.
+vendor: NostMesh
+homepage: https://github.com/luizosorio/nostmesh
+license: Apache-2.0
+
+# The binary is static and CGO-free, so it depends on nothing at runtime. The
+# wireguard module is a kernel prerequisite rather than a package: it ships with
+# the distribution's kernel and is loaded by the operator.
+depends: []
+
+contents:
+  - src: ./bin/nostmesh
+    dst: /usr/bin/nostmesh
+    file_info:
+      mode: 0755
+
+  - src: ./dist/nostmesh.service
+    dst: /lib/systemd/system/nostmesh.service
+    type: config
+    file_info:
+      mode: 0644
+
+  - src: ./examples/nostmesh.logrotate
+    dst: /etc/logrotate.d/nostmesh
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  # An example rather than a working configuration. Installing a live one would
+  # either start a node nobody configured or overwrite an operator's own on
+  # upgrade; noreplace protects the second case and the .example suffix the
+  # first.
+  - src: ./examples/nostmesh.json
+    dst: /etc/nostmesh/nostmesh.json.example
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  # 0755, not 0700: systemd refuses to start when ConfigurationDirectory has a
+  # different mode than it manages, and a node whose service will not start is
+  # a worse default than a directory an unprivileged user can list. The
+  # configuration file itself is 0600 and owned by the service user.
+  - dst: /etc/nostmesh
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  preinstall: ./packaging/preinstall.sh
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh
+  postremove: ./packaging/postremove.sh

@@ -174,6 +174,147 @@ docker-test-privileged:
 		-e GOFLAGS=-buildvcs=false \
 		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src; make test-privileged'
 
+# Release artifacts: static binaries, archives, packages and checksums.
+#
+# Every target below is reproducible from a clean checkout and a tag. Nothing
+# here signs anything: signing needs a key, and a key in CI is a decision to
+# make deliberately rather than acquire by adding a step.
+DIST      := dist
+PLATFORMS := linux/amd64 linux/arm64
+
+# nfpm builds .deb and .rpm from one description. By digest, per NM-23: a tag
+# can be republished, and a packaging tool that changes underneath a release is
+# a supply-chain problem in the artifact users install.
+#
+# goreleaser/nfpm:v2.43.1
+NFPM_IMAGE ?= goreleaser/nfpm@sha256:f1e9f1adcf452a85ab7765aa7252cdb2f94816ead5363bbd52a4e563087c942b
+
+# The packaged unit differs from the example by one line: a package installs to
+# /usr/bin, while the example documents the manual install under /usr/local/bin.
+# Generated rather than committed twice, so the two cannot drift.
+$(DIST)/nostmesh.service: examples/nostmesh.service
+	@mkdir -p $(DIST)
+	sed 's|/usr/local/bin/nostmesh|/usr/bin/nostmesh|' $< > $@
+	@grep -q '/usr/bin/nostmesh serve' $@ || { \
+		echo "the packaged unit does not point at /usr/bin/nostmesh" >&2; exit 1; }
+
+# One static binary per platform, each in its own directory so the archive can
+# be built from it without renaming.
+.PHONY: dist-binaries
+dist-binaries:
+	@mkdir -p $(DIST)
+	@for target in $(PLATFORMS); do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		printf 'building %s/%s\n' "$$os" "$$arch"; \
+		mkdir -p $(DIST)/$$os-$$arch; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			$(GO) build -trimpath -ldflags '$(LDFLAGS)' \
+			-o $(DIST)/$$os-$$arch/$(BINARY) ./cmd/nostmesh || exit 1; \
+	done
+
+# Archives carry the licence and the notice alongside the binary: the licence
+# requires it, and a user who downloaded a tarball has nothing else to read.
+.PHONY: dist-archives
+dist-archives: dist-binaries
+	@for target in $(PLATFORMS); do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		cp LICENSE NOTICE README.md $(DIST)/$$os-$$arch/ 2>/dev/null || true; \
+		tar -czf $(DIST)/$(BINARY)_$(VERSION)_$$os_$$arch.tar.gz \
+			-C $(DIST)/$$os-$$arch . || exit 1; \
+		printf 'packaged %s\n' "$(BINARY)_$(VERSION)_$$os_$$arch.tar.gz"; \
+	done
+
+# Debian and RPM disagree about architecture names, and neither matches Go's for
+# every case: amd64 is x86_64 to rpm, arm64 is aarch64. nfpm handles the
+# translation when it builds; anything reading the filenames afterwards has to
+# know both spellings, which is why dist-verify carries the mapping.
+# Packaging runs docker itself, so it cannot run inside the Go container the way
+# the other targets do — there is no docker in there, and mounting the socket to
+# add one would give a build container control of the host's daemon. The binaries
+# it packages are built by docker-dist-binaries first, from the host.
+.PHONY: dist-packages
+dist-packages: $(DIST)/nostmesh.service
+	@mkdir -p bin
+	@for target in $(PLATFORMS); do \
+		arch=$${target#*/}; \
+		[ -f $(DIST)/linux-$$arch/$(BINARY) ] || { \
+			echo "no binary for $$arch; run dist-binaries first" >&2; exit 1; }; \
+		cp $(DIST)/linux-$$arch/$(BINARY) bin/$(BINARY); \
+		for format in deb rpm; do \
+			docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
+				-e PKG_ARCH=$$arch -e PKG_VERSION=$(PKG_VERSION) \
+				$(NFPM_IMAGE) package \
+				--config packaging/nfpm.yaml --target $(DIST) --packager $$format \
+				|| exit 1; \
+		done; \
+	done
+	@rm -f bin/$(BINARY)
+
+# The version a package carries. Debian and RPM both refuse a leading "v", so
+# the tag's is stripped here rather than in every caller.
+PKG_VERSION ?= $(patsubst v%,%,$(VERSION))
+
+# One file listing every artifact, which is what a user verifies against.
+# Produced last so nothing can be added afterwards without changing it.
+.PHONY: dist-checksums
+dist-checksums:
+	@cd $(DIST) && rm -f SHA256SUMS && \
+		sha256sum *.tar.gz *.deb *.rpm > SHA256SUMS 2>/dev/null && \
+		cat SHA256SUMS
+
+# Prove the packages carry what they claim.
+#
+# A package is the artifact users actually install, and nothing else in the
+# suite looks inside one. Without this, a path typo ships a package that
+# installs a binary nobody can run and reports success doing it.
+#
+# dpkg-deb and rpm read their own formats; both are in the container that builds
+# them, so this needs no tool the release does not already have.
+.PHONY: dist-verify
+dist-verify:
+	@set -e; \
+	for pair in amd64:x86_64 arm64:aarch64; do \
+		go_arch=$${pair%%:*}; rpm_arch=$${pair##*:}; \
+		deb=$$(ls $(DIST)/*_$${go_arch}.deb 2>/dev/null | head -1); \
+		rpm=$$(ls $(DIST)/*.$${rpm_arch}.rpm 2>/dev/null | head -1); \
+		[ -n "$$deb" ] || { echo "no .deb for $$go_arch" >&2; exit 1; }; \
+		[ -n "$$rpm" ] || { echo "no .rpm for $$rpm_arch" >&2; exit 1; }; \
+		tar=$$(ls $(DIST)/*_$${go_arch}.tar.gz 2>/dev/null | head -1); \
+		[ -n "$$tar" ] || { echo "no archive for $$go_arch" >&2; exit 1; }; \
+		docker run --rm -v "$(PWD)":/src -w /src $(VERIFY_IMAGE) \
+			sh /src/packaging/verify.sh "$$deb" "$$rpm" "$$tar" || exit 1; \
+	done
+	@echo "checksums cover every artifact:"
+	@cd $(DIST) && for file in *.tar.gz *.deb *.rpm; do \
+		grep -q " $$file$$" SHA256SUMS \
+			|| { echo "$$file missing from SHA256SUMS" >&2; exit 1; }; \
+	done && echo "  ok"
+
+# debian:13-slim, for dpkg-deb. By digest, per NM-23.
+VERIFY_IMAGE ?= debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+
+# The whole release, using whatever Go is on PATH.
+#
+# This is the target CI runs: the runner already has the pinned toolchain, so
+# wrapping the build in a container there would add a layer that changes
+# nothing. Packaging and verification still use their own images, because nfpm
+# and dpkg-deb are not on the runner and pinning them by digest is what keeps
+# the artifact reproducible (NM-23).
+.PHONY: dist
+dist: dist-archives dist-packages dist-checksums
+
+# The same release, for a developer with no local Go — the project's own
+# development rule. The build runs in the Go container; the rest is identical.
+.PHONY: docker-dist
+docker-dist:
+	$(MAKE) docker-dist-archives VERSION=$(VERSION)
+	$(MAKE) dist-packages VERSION=$(VERSION)
+	$(MAKE) dist-checksums
+
+.PHONY: dist-clean
+dist-clean:
+	rm -rf $(DIST)
+
 .PHONY: check
 check: fmt-check vet test portability
 
@@ -185,11 +326,11 @@ fix-ownership:
 
 .PHONY: clean
 clean:
-	rm -rf bin coverage.out coverage-all.out
+	rm -rf bin coverage.out coverage-all.out $(DIST)
 
 # Run any target inside the Go container, matching CI and the remote host.
 .PHONY: docker-%
 docker-%:
 	docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
 		$(DOCKER_ENV) \
-		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src 2>/dev/null; make $*' 
+		$(GO_IMAGE) sh -c 'git config --global --add safe.directory /src 2>/dev/null; make $* VERSION=$(VERSION)' 
