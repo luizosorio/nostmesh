@@ -90,6 +90,7 @@ jobs:
             dist/*.tar.gz
             dist/*.deb
             dist/*.rpm
+            dist/*_sbom.json
             dist/SHA256SUMS
           retention-days: 7
 
@@ -106,12 +107,30 @@ jobs:
           name: release-artifacts
           path: dist
 
+      # Every file SHA256SUMS names has to be here, or `sha256sum -c` fails on a
+      # complete download and trains the reader to ignore it. This catches the
+      # shape rather than one instance: a new artifact added to the checksums
+      # and forgotten in the upload lists above stops the release here.
+      - name: Confirm every checksummed file is present
+        run: |
+          missing=0
+          while read -r _ file; do
+            [ -n "$file" ] || continue
+            if [ ! -f "dist/$file" ]; then
+              echo "::error::SHA256SUMS names $file, which is not being published"
+              missing=1
+            fi
+          done < dist/SHA256SUMS
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every checksummed file is present"
+
       - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
           files: |
             dist/*.tar.gz
             dist/*.deb
             dist/*.rpm
+            dist/*_sbom.json
             dist/SHA256SUMS
           # A hyphen marks a pre-release, following SemVer: everything after it
           # is a pre-release identifier. So v0.2.4-2b is a step towards v0.2.4,
