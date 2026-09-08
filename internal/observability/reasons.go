@@ -76,6 +76,12 @@ const (
 // Connectivity: candidates, probes and path selection.
 const (
 	// ReasonNoCandidates is a gather that produced nothing usable.
+	// ReasonSameIdentity reports a peer presenting this node's own identity.
+	//
+	// Not a failure of the peer or the path: it is a configuration that cannot
+	// work, and the operator who created it is the only one who can undo it.
+	ReasonSameIdentity = "same_identity"
+
 	// ReasonSingleObserver reports a node that cannot compare observations.
 	//
 	// Not a failure: the node works. It says the node has no way to notice that

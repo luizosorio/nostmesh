@@ -25,6 +25,19 @@ var (
 	// ErrUnauthorized reports a peer local policy does not permit.
 	ErrUnauthorized = errors.New("peer is not authorized")
 
+	// ErrSameIdentity reports a peer presenting this node's own identity.
+	//
+	// A Nostr key names a node, and two nodes sharing one cannot open a session
+	// with each other: role resolution compares the keys and has nothing to
+	// break the tie with, message routing cannot tell them apart, and address
+	// derivation gives them the same overlay address.
+	//
+	// Whether a shared identity should be supported at all is an open question.
+	// That it should fail loudly rather than hang is not: without this, both
+	// sides become the responder and wait for a request nobody sends, and the
+	// operator sees nothing.
+	ErrSameIdentity = errors.New("peer presents this node's own identity")
+
 	// ErrNoValidPath reports that no candidate could be verified.
 	ErrNoValidPath = errors.New("no candidate path could be verified")
 
@@ -545,6 +558,14 @@ func resolveRole(local, peer domain.NostrPublicKey, requested Role) Role {
 // session is not established until the data plane has actually carried a
 // handshake.
 func (d *Driver) Connect(ctx context.Context, peer domain.NostrPublicKey, role Role) (err error) {
+	// Refused here rather than left to fail on its own, because on its own it
+	// does not fail: with one key on both sides neither becomes the initiator
+	// and both wait for a request nobody sends. This is the one place holding
+	// both keys, and silence is the worst answer available.
+	if peer == d.identity {
+		return fmt.Errorf("%w: %s", ErrSameIdentity, peer.Short())
+	}
+
 	role = resolveRole(d.identity, peer, role)
 	started := d.clock.Now()
 

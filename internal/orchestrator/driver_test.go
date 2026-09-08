@@ -14,6 +14,7 @@ import (
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/identity"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/observability"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
@@ -1157,5 +1158,34 @@ func candidateMessage(address string) scriptedMessage {
 				Final: true,
 			},
 		},
+	}
+}
+
+// A peer presenting this node's own identity is refused, not waited on.
+//
+// Without this the session does not fail — it hangs. Role resolution compares
+// the two keys, so with one key on both sides neither becomes the initiator and
+// both wait for a request nobody sends. The operator sees nothing at all, which
+// is why this is worth refusing even though whether shared identities should be
+// supported is still open (#60).
+func TestAPeerWithThisNodesIdentityIsRefused(t *testing.T) {
+	driver, _, _, _, _ := newDriverFixture(t, true)
+
+	// The node's own identity, which is what a shared key produces on the far
+	// side.
+	err := driver.Connect(context.Background(), driver.identity, RoleAuto)
+	if err == nil {
+		t.Fatal("a peer sharing this node's identity was accepted")
+	}
+	if !errors.Is(err, ErrSameIdentity) {
+		t.Errorf("error = %v, want %v", err, ErrSameIdentity)
+	}
+}
+
+// The refusal carries a reason code, so it reaches the log and `nostmesh state`.
+func TestSharingAnIdentityHasItsOwnReason(t *testing.T) {
+	reason := classifyDriverFailure(ErrSameIdentity)
+	if reason != observability.ReasonSameIdentity {
+		t.Errorf("reason = %q, want %q", reason, observability.ReasonSameIdentity)
 	}
 }

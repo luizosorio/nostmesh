@@ -26,6 +26,8 @@ func classifyDriverFailure(err error) string {
 
 	case errors.Is(err, ErrUnauthorized):
 		return observability.ReasonUnauthorized
+	case errors.Is(err, ErrSameIdentity):
+		return observability.ReasonSameIdentity
 	case errors.Is(err, ErrNoRequest):
 		return observability.ReasonTimeout
 	case errors.Is(err, ErrSessionDropped):
