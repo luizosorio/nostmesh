@@ -164,13 +164,15 @@ func (s *RelaySet) Connect(ctx context.Context) error {
 				slog.String("relay", s.relays[i].URL()))
 			continue
 		}
-		// The URL is configuration this operator wrote, so it is theirs to see;
-		// the error is from a dial rather than from a peer.
+		// The URL is configuration this operator wrote, so it is theirs to see.
+		// The dial error is not: a relay chooses what its TLS alert or HTTP
+		// status says, so logging it verbatim lets a remote party write
+		// arbitrary text into this node's journal and give every failure a
+		// different shape. The reason code carries the diagnosis instead.
 		s.log.Warn("relay unreachable",
 			observability.Event("relay.disconnected"),
 			slog.String("relay", s.relays[i].URL()),
-			observability.Reason(observability.ReasonRelayUnreachable),
-			slog.String("error", err.Error()))
+			observability.Reason(observability.ReasonRelayUnreachable))
 		reasons = append(reasons, fmt.Errorf("%s: %w", s.relays[i].URL(), err))
 	}
 

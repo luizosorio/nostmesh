@@ -514,6 +514,62 @@ func TestWorkflowsPinEverythingTheyInstall(t *testing.T) {
 					entry.Name(), i+1)
 			}
 		}
+// TestPeerFacingPackagesLogNoRawErrors keeps log cardinality bounded.
+//
+// An error's text is unbounded, and in the packages that read what a peer sent
+// it is partly the peer's: a malformed field, a rejected address, a relay's own
+// message. Logging it verbatim means a peer can write arbitrary text into this
+// node's journal and give every occurrence a different shape, which is what
+// makes a log impossible to count and a metric impossible to aggregate.
+//
+// The rule is not "never log an error". It is that the packages handling
+// peer-supplied data report a reason code from the closed vocabulary, which
+// NM-22 already requires and which every call site there already does. This
+// stops the next one drifting.
+//
+// Packages that only ever see local errors — netlink refusing, a file failing —
+// are not covered: that text is this host's own and is bounded by this code.
+func TestPeerFacingPackagesLogNoRawErrors(t *testing.T) {
+	root := repoRoot(t)
+
+	// Where a peer's input is parsed, validated or decrypted.
+	peerFacing := []string{
+		"internal/protocol",
+		"internal/nostr",
+		"internal/session",
+	}
+
+	const rawErrorAttr = `slog.String("error"`
+
+	for _, pkg := range peerFacing {
+		t.Run(pkg, func(t *testing.T) {
+			dir := filepath.Join(root, pkg)
+			err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if entry.IsDir() || !strings.HasSuffix(path, ".go") {
+					return nil
+				}
+				if strings.HasSuffix(path, "_test.go") {
+					return nil
+				}
+
+				content, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return readErr
+				}
+				if strings.Contains(string(content), rawErrorAttr) {
+					t.Errorf("%s logs an error's text; a peer can shape it, so report a "+
+						"reason code from the closed vocabulary instead (see NM-22)",
+						relative(t, path))
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("scanning %s: %v", pkg, err)
+			}
+		})
 	}
 }
 
