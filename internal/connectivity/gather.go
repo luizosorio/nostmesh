@@ -408,6 +408,13 @@ func (g *Gatherer) gatherFromObservers(ctx context.Context, localPort int) ([]Ca
 		lastErr    error
 	)
 
+	// Every observer is asked, and every distinct answer is kept. A provider
+	// that presents more than one public address gives different observers
+	// different answers, and each of those is a mapping that may be the live
+	// one — so offering all of them is what lets the peer find the one that
+	// works. See #58.
+	seen := make(map[netip.AddrPort]string, len(g.policy.Observers))
+
 	for i, server := range g.policy.Observers {
 		if ctx.Err() != nil {
 			break
@@ -424,6 +431,27 @@ func (g *Gatherer) gatherFromObservers(ctx context.Context, localPort int) ([]Ca
 			lastErr = fmt.Errorf("observer %s reported an unusable address: %w", server, err)
 			continue
 		}
+
+		// Two observers reporting the same mapping is the ordinary case and
+		// adds nothing: the peer would probe one address twice.
+		if first, repeated := seen[observed]; repeated {
+			g.log.Debug("observers agree on the mapped address",
+				observability.Event("candidate.observer.agreed"),
+				slog.String("observer", server),
+				slog.String("agrees_with", first))
+			continue
+		}
+
+		// Disagreement is the signal. A provider using one address per flow
+		// produces exactly this, and it is worth an operator seeing: it explains
+		// why a single candidate would have been the wrong one.
+		if len(seen) > 0 {
+			g.log.Warn("observers disagree about this node's mapped address",
+				observability.Event("candidate.observer.disagreed"),
+				slog.String("observer", server),
+				slog.Int("distinct_addresses", len(seen)+1))
+		}
+		seen[observed] = server
 
 		candidates = append(candidates, Candidate{
 			ID:      fmt.Sprintf("srflx-%d", i),
@@ -443,6 +471,17 @@ func (g *Gatherer) gatherFromObservers(ctx context.Context, localPort int) ([]Ca
 		}
 		return nil, errors.New("no observer answered")
 	}
+
+	// One observer cannot tell a stable mapping from an alternating one: there
+	// is nothing to compare its answer against. Said once, at info, because it
+	// is the difference between "this node has one candidate" and "this node
+	// can only ever have one".
+	if len(g.policy.Observers) == 1 {
+		g.log.Info("only one observer is configured, so a changing public address cannot be detected",
+			observability.Event("candidate.observer.single"),
+			observability.Reason(observability.ReasonSingleObserver))
+	}
+
 	return candidates, nil
 }
 

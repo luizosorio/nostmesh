@@ -76,6 +76,13 @@ const (
 // Connectivity: candidates, probes and path selection.
 const (
 	// ReasonNoCandidates is a gather that produced nothing usable.
+	// ReasonSingleObserver reports a node that cannot compare observations.
+	//
+	// Not a failure: the node works. It says the node has no way to notice that
+	// its public address changed between sessions, because there is only one
+	// answer and nothing to check it against.
+	ReasonSingleObserver = "single_observer"
+
 	ReasonNoCandidates = "no_candidates"
 
 	// ReasonProbeTimeout is a connectivity check that got no answer.
