@@ -37,6 +37,33 @@ type controlQuery struct {
 type controlState struct {
 	Node  string             `json:"node"`
 	Peers []controlPeerState `json:"peers"`
+
+	// Routes are what this node decided to route, which is the RIB. The
+	// kernel's own table — the FIB — is what `nostmesh status` reports, and the
+	// two disagreeing is a defect an operator can only see by reading both.
+	Routes []controlRouteState `json:"routes,omitempty"`
+
+	// Conflicts are destinations more than one peer offers.
+	//
+	// Reported rather than resolved out of sight: one route per prefix is
+	// installed and the loser is kept (NM-25), so an operator wondering why a
+	// provider's route is not in use can see that another won.
+	Conflicts []controlRouteConflict `json:"conflicts,omitempty"`
+}
+
+// controlRouteState is one destination this node routes, and who offered it.
+type controlRouteState struct {
+	Prefix   string `json:"prefix"`
+	Provider string `json:"provider"`
+	Metric   uint32 `json:"metric"`
+	Expires  string `json:"expires,omitempty"`
+}
+
+// controlRouteConflict is one destination several peers claim.
+type controlRouteConflict struct {
+	Prefix    string   `json:"prefix"`
+	Installed string   `json:"installed"`
+	Providers []string `json:"providers"`
 }
 
 // controlPeerState is what the service knows about one peer.

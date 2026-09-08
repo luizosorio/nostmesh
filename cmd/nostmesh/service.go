@@ -799,7 +799,53 @@ func (s *service) snapshot() controlState {
 	sort.Slice(state.Peers, func(i, j int) bool {
 		return state.Peers[i].Alias < state.Peers[j].Alias
 	})
+
+	state.Routes, state.Conflicts = s.routeSnapshot()
 	return state
+}
+
+// routeSnapshot reports the routing table for `nostmesh state`.
+//
+// Empty when the node routes nothing, which is the default: a node that
+// announces and accepts no prefixes has an empty RIB, and reporting an empty
+// section is noise rather than information.
+func (s *service) routeSnapshot() ([]controlRouteState, []controlRouteConflict) {
+	if s.super == nil || s.super.routes == nil {
+		return nil, nil
+	}
+
+	installed, conflicts := s.super.routes.Snapshot()
+
+	routes := make([]controlRouteState, 0, len(installed))
+	for _, route := range installed {
+		entry := controlRouteState{
+			Prefix:   route.Prefix.String(),
+			Provider: route.Provider.Short(),
+			Metric:   route.Metric,
+		}
+		if !route.ExpiresAt.IsZero() {
+			entry.Expires = route.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		routes = append(routes, entry)
+	}
+
+	reported := make([]controlRouteConflict, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		providers := make([]string, 0, len(conflict.Offers))
+		for _, offer := range conflict.Offers {
+			providers = append(providers, offer.Provider.Short())
+		}
+		reported = append(reported, controlRouteConflict{
+			Prefix:    conflict.Prefix.String(),
+			Installed: conflict.Installed.Short(),
+			Providers: providers,
+		})
+	}
+
+	if len(routes) == 0 && len(reported) == 0 {
+		return nil, nil
+	}
+	return routes, reported
 }
 
 // serving reports whether a peer currently has a worker.
