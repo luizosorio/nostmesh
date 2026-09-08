@@ -327,3 +327,97 @@ func TestAnnouncementVersionsIncrease(t *testing.T) {
 		t.Error("the refreshed announcement does not extend the validity")
 	}
 }
+
+// The routes a node installed are visible in what the service reports.
+//
+// The RIB is what this node decided; `nostmesh status` shows the kernel's own
+// table. An operator can only tell the two apart by reading both, and before
+// this neither reported a route at all.
+func TestInstalledRoutesAreReportedToTheOperator(t *testing.T) {
+	peer := testNostrKey(t, 140)
+	handler, _ := newTestRouteHandler(t, peer, "10.20.30.0/24")
+	ctx := context.Background()
+
+	if err := handler.Announce(ctx, peer, announcement("10.20.30.0/24")); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+	if err := handler.Reconcile(ctx, peer, "nm0"); err != nil {
+		t.Fatalf("reconciling: %v", err)
+	}
+
+	installed, conflicts := handler.Snapshot()
+	if len(installed) != 1 {
+		t.Fatalf("reported %d routes, want the one that was installed", len(installed))
+	}
+	if installed[0].Provider != peer {
+		t.Error("the reported route does not name the peer that offered it")
+	}
+	if installed[0].ExpiresAt.IsZero() {
+		t.Error("the reported route carries no validity; an operator cannot see when it lapses")
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("conflicts = %v, want none with a single provider", conflicts)
+	}
+}
+
+// A contested destination is reported, with the winner named.
+//
+// Only one route per prefix is installed, and an operator wondering why a
+// provider's offer is not in use needs to see that another won rather than that
+// theirs vanished.
+func TestAContestedDestinationIsReported(t *testing.T) {
+	winner := testNostrKey(t, 141)
+	loser := testNostrKey(t, 142)
+
+	list := policy.NewAllowlist()
+	for _, peer := range []domain.NostrPublicKey{winner, loser} {
+		if err := list.Add(policy.Grant{
+			Peer:       peer,
+			Actions:    []policy.Action{policy.ActionRoute},
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.20.30.0/24")},
+		}); err != nil {
+			t.Fatalf("granting: %v", err)
+		}
+	}
+
+	controller := wireguard.NewFakeController()
+	journal := netstate.NewJournalStore(t.TempDir())
+	manager := netstate.NewManager(controller, journal, stubClock{at: routeClock()()})
+	router := policy.NewRouter(list, domain.NewRouteTable(0), domain.LocalNetwork{})
+	handler := newRouteHandler(router, manager, routeClock(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx := context.Background()
+
+	// The better metric wins; both are recorded.
+	good := announcement("10.20.30.0/24")
+	good.Routes[0].Metric = 5
+	if err := handler.Announce(ctx, winner, good); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+	poor := announcement("10.20.30.0/24")
+	poor.Routes[0].Metric = 50
+	if err := handler.Announce(ctx, loser, poor); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+
+	_, conflicts := handler.Snapshot()
+	if len(conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want the contested destination", len(conflicts))
+	}
+	if len(conflicts[0].Offers) != 2 {
+		t.Errorf("offers = %d, want both providers visible", len(conflicts[0].Offers))
+	}
+}
+
+// A node that routes nothing reports nothing.
+//
+// The default, and the common case. Reporting an empty section on every node
+// that never announced anything is noise rather than information.
+func TestANodeRoutingNothingReportsNothing(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 143), "10.20.30.0/24")
+
+	installed, conflicts := handler.Snapshot()
+	if len(installed) != 0 || len(conflicts) != 0 {
+		t.Errorf("a node with no routes reported %v / %v", installed, conflicts)
+	}
+}
