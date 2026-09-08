@@ -457,3 +457,75 @@ func TestAdapterRefusesADefaultRoute(t *testing.T) {
 		}
 	})
 }
+
+// Observing an interface reports the routes the kernel holds for it.
+//
+// The fake models routes, and a fake validates the implementation against
+// itself. This is the confrontation with netlink: install a route, observe, and
+// require the observation to contain it.
+//
+// `nostmesh status` reads exactly this, so an observation that omitted routes
+// would leave an operator unable to see the forwarding table at all.
+func TestObservationReportsTheKernelRoutes(t *testing.T) {
+	requirePrivileges(t)
+
+	withNamespace(t, func() {
+		adapter, closeAdapter, err := wireguard.NewController()
+		if err != nil {
+			t.Fatalf("opening the controller: %v", err)
+		}
+		defer func() { _ = closeAdapter() }()
+
+		ctx := context.Background()
+		if _, err := adapter.EnsureInterface(ctx, testSpec(t, "nm-observe")); err != nil {
+			t.Fatalf("creating the interface: %v", err)
+		}
+
+		// Before installing anything, so a report that always returned the same
+		// list would fail here rather than pass everything below.
+		before, err := adapter.ObserveInterface(ctx, "nm-observe")
+		if err != nil {
+			t.Fatalf("observing: %v", err)
+		}
+		if len(before.Routes) != 0 {
+			t.Fatalf("routes = %v before anything was installed", before.Routes)
+		}
+
+		wanted := []netip.Prefix{
+			netip.MustParsePrefix("10.71.0.0/16"),
+			netip.MustParsePrefix("10.72.0.0/16"),
+		}
+		for _, prefix := range wanted {
+			if err := adapter.AddRoute(ctx, "nm-observe", prefix); err != nil {
+				t.Fatalf("installing %s: %v", prefix, err)
+			}
+		}
+
+		after, err := adapter.ObserveInterface(ctx, "nm-observe")
+		if err != nil {
+			t.Fatalf("observing: %v", err)
+		}
+		if len(after.Routes) != len(wanted) {
+			t.Fatalf("routes = %v, want %v", after.Routes, wanted)
+		}
+		// Sorted, so two observations of one interface read the same way.
+		for i, prefix := range wanted {
+			if after.Routes[i] != prefix {
+				t.Errorf("route %d = %s, want %s", i, after.Routes[i], prefix)
+			}
+		}
+
+		// And a removal is reflected, so the report tracks the kernel rather
+		// than accumulating what it has seen.
+		if err := adapter.RemoveRoute(ctx, "nm-observe", wanted[0]); err != nil {
+			t.Fatalf("removing: %v", err)
+		}
+		final, err := adapter.ObserveInterface(ctx, "nm-observe")
+		if err != nil {
+			t.Fatalf("observing: %v", err)
+		}
+		if len(final.Routes) != 1 || final.Routes[0] != wanted[1] {
+			t.Errorf("routes = %v, want only %s after removal", final.Routes, wanted[1])
+		}
+	})
+}
