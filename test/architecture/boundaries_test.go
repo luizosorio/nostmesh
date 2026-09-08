@@ -45,6 +45,40 @@ var adapterPackages = []string{
 	"internal/netstate",
 }
 
+// skipDirectory reports whether a walk should not descend into a directory.
+//
+// These tests read the module's own sources. A checkout may sit beside working
+// material — reference notes, a scratch directory, a vendor tree — that is
+// neither ours to scan nor meaningful to scan, and a walk that descended into
+// it would parse files this project does not own.
+//
+// The rule is a property rather than a list of names: a directory holding no Go
+// package is out of scope, whatever it is called. Listing names would make the
+// scan depend on what happens to be beside the checkout, and would put those
+// names in a public repository.
+func skipDirectory(path, name string) bool {
+	if name == ".git" || strings.HasPrefix(name, ".") {
+		return true
+	}
+	return !holdsGoFiles(path)
+}
+
+// holdsGoFiles reports whether a directory tree contains any Go source.
+func holdsGoFiles(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipAll
+		}
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 
@@ -222,8 +256,7 @@ func callersOf(t *testing.T, root, identifier string) []string {
 			return err
 		}
 		if entry.IsDir() {
-			// Reference documentation is not part of the module.
-			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+			if skipDirectory(path, entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -301,7 +334,7 @@ func TestGoNostrRootIsNeverImported(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+			if skipDirectory(path, entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -357,7 +390,7 @@ func TestNoPrivateKeyFieldsInWireTypes(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+			if skipDirectory(path, entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -417,7 +450,7 @@ func TestLogEventsUseTheAttributeConstructor(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+			if skipDirectory(path, entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -514,7 +547,7 @@ func TestAllowedIPsComeFromAPolicyDecision(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			if name := entry.Name(); name == ".git" || name == "nostmesh-docs" {
+			if skipDirectory(path, entry.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
