@@ -514,6 +514,9 @@ func TestWorkflowsPinEverythingTheyInstall(t *testing.T) {
 					entry.Name(), i+1)
 			}
 		}
+	}
+}
+
 // TestPeerFacingPackagesLogNoRawErrors keeps log cardinality bounded.
 //
 // An error's text is unbounded, and in the packages that read what a peer sent
