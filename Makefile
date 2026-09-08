@@ -266,12 +266,48 @@ dist-packages: $(DIST)/nostmesh.service
 # nobody queries.
 PKG_VERSION ?= $(patsubst v%,%,$(VERSION))
 
+# The software bill of materials: every module that reaches the binary, with its
+# version and licence, in a format a scanner can read.
+#
+# THIRD-PARTY.md already records the same facts for a person, and CI already
+# fails when it goes stale. This is the machine-readable half — what a user
+# downloading a release needs in order to answer "does this contain the thing
+# that was just disclosed" without reading prose.
+#
+# cyclonedx-gomod reads go.mod directly, so the inventory is what the build
+# actually used rather than what someone remembered to write down.
+#
+# Installed from outside the module: `go install pkg@version` inside one resolves
+# against that module's requirements and fails with "not a go module".
+#
+# cyclonedx-gomod v1.10.0, pinned like everything else this pulls (NM-23).
+#
+# Not the newest: v1.11.0 and v1.12.0 both require Go 1.26, and this project
+# pins 1.25.14. Taking them would let the SBOM tool dictate the toolchain the
+# binary is built with, which is backwards — the inventory describes the build,
+# it does not choose it.
+SBOM_VERSION ?= v1.10.0
+
+.PHONY: dist-sbom
+dist-sbom:
+	@mkdir -p $(DIST)
+	docker run --rm --user $(DOCKER_USER) -v "$(PWD)":/src -w /src \
+		$(DOCKER_ENV) \
+		$(GO_IMAGE) sh -c '\
+			git config --global --add safe.directory /src 2>/dev/null; \
+			cd /tmp && GOBIN=/tmp/sbom-bin go install \
+				github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$(SBOM_VERSION) && \
+			cd /src && /tmp/sbom-bin/cyclonedx-gomod app \
+				-main ./cmd/nostmesh -licenses -json \
+				-output $(DIST)/nostmesh_$(VERSION)_sbom.json .'
+	@echo "sbom: $(DIST)/nostmesh_$(VERSION)_sbom.json"
+
 # One file listing every artifact, which is what a user verifies against.
 # Produced last so nothing can be added afterwards without changing it.
 .PHONY: dist-checksums
 dist-checksums:
 	@cd $(DIST) && rm -f SHA256SUMS && \
-		sha256sum *.tar.gz *.deb *.rpm > SHA256SUMS 2>/dev/null && \
+		sha256sum *.tar.gz *.deb *.rpm *_sbom.json > SHA256SUMS 2>/dev/null && \
 		cat SHA256SUMS
 
 # Prove the packages carry what they claim.
@@ -297,10 +333,15 @@ dist-verify:
 			sh /src/packaging/verify.sh "$$deb" "$$rpm" "$$tar" || exit 1; \
 	done
 	@echo "checksums cover every artifact:"
-	@cd $(DIST) && for file in *.tar.gz *.deb *.rpm; do \
+	@cd $(DIST) && for file in *.tar.gz *.deb *.rpm *_sbom.json; do \
 		grep -q " $$file$$" SHA256SUMS \
 			|| { echo "$$file missing from SHA256SUMS" >&2; exit 1; }; \
 	done && echo "  ok"
+	@# An SBOM listing nothing is worse than none: it looks like an inventory.
+	@components=$$(grep -o '"purl"' $(DIST)/*_sbom.json | wc -l); \
+		[ "$$components" -gt 5 ] \
+			|| { echo "the SBOM lists $$components components; the build has more" >&2; exit 1; }; \
+		echo "sbom: $$components components"
 
 # debian:13-slim, for dpkg-deb. By digest, per NM-23.
 VERIFY_IMAGE ?= debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
@@ -313,7 +354,7 @@ VERIFY_IMAGE ?= debian@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017
 # and dpkg-deb are not on the runner and pinning them by digest is what keeps
 # the artifact reproducible (NM-23).
 .PHONY: dist
-dist: dist-archives dist-packages dist-checksums
+dist: dist-archives dist-packages dist-sbom dist-checksums
 
 # The same release, for a developer with no local Go — the project's own
 # development rule. The build runs in the Go container; the rest is identical.
@@ -321,6 +362,7 @@ dist: dist-archives dist-packages dist-checksums
 docker-dist:
 	$(MAKE) docker-dist-archives VERSION=$(VERSION)
 	$(MAKE) dist-packages VERSION=$(VERSION)
+	$(MAKE) dist-sbom VERSION=$(VERSION)
 	$(MAKE) dist-checksums
 
 .PHONY: dist-clean
