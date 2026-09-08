@@ -262,6 +262,17 @@ func buildRouteHandler(
 // route change is cheaper than a tunnel move and can afford to be quicker.
 const routeHysteresis = 30 * time.Second
 
+// Snapshot reports what this node routes and which destinations are contested.
+//
+// Read from the same router the hold loop feeds, so `nostmesh state` reports the
+// decision that was actually made rather than a second account of it.
+func (h *routeHandler) Snapshot() ([]domain.Route, []domain.RouteConflict) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.router.Installed(), h.router.Conflicts(h.clock())
+}
+
 // apply installs and removes what the router decided.
 //
 // Installation is journaled as a transaction so a partial failure rolls back;

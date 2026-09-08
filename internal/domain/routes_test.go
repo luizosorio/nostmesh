@@ -409,3 +409,93 @@ func TestSelectionOutputIsOrdered(t *testing.T) {
 		}
 	}
 }
+
+// A more specific prefix is its own destination, not a rival.
+//
+// 10.0.0.0/8 and 10.1.0.0/16 overlap, and the kernel resolves that by
+// longest-prefix match. The table must not resolve it first: treating them as
+// one contested destination would install only one, and the operator would lose
+// the specific route they were offered.
+func TestAMoreSpecificPrefixIsItsOwnDestination(t *testing.T) {
+	table := NewRouteTable(0)
+	table.Offer(announced(t, "10.0.0.0/8", "provider-a", 10))
+	table.Offer(announced(t, "10.1.0.0/16", "provider-b", 10))
+
+	install, _ := table.Select(routeAt())
+	if len(install) != 2 {
+		t.Fatalf("installed %d routes, want both; the kernel resolves the overlap", len(install))
+	}
+
+	// And neither is reported as contested: two destinations, one provider each.
+	if conflicts := table.Conflicts(routeAt()); len(conflicts) != 0 {
+		t.Errorf("conflicts = %v; overlapping prefixes are not the same destination", conflicts)
+	}
+}
+
+// One provider offering both a wide and a narrow prefix keeps both.
+//
+// A subnet router announcing 10.0.0.0/8 and a more specific 10.1.0.0/16 is
+// describing two things it can reach, not correcting itself.
+func TestOneProviderCanOfferOverlappingPrefixes(t *testing.T) {
+	table := NewRouteTable(0)
+	table.Offer(announced(t, "10.0.0.0/8", "provider-a", 10))
+	table.Offer(announced(t, "10.1.0.0/16", "provider-a", 5))
+
+	install, _ := table.Select(routeAt())
+	if len(install) != 2 {
+		t.Errorf("installed %d, want both prefixes from the same provider", len(install))
+	}
+}
+
+// Withdrawing the specific route leaves the wide one.
+func TestWithdrawingASpecificPrefixKeepsTheWiderOne(t *testing.T) {
+	table := NewRouteTable(0)
+	wide := announced(t, "10.0.0.0/8", "provider-a", 10)
+	narrow := announced(t, "10.1.0.0/16", "provider-a", 10)
+	table.Offer(wide)
+	table.Offer(narrow)
+	table.Select(routeAt())
+
+	table.Withdraw(narrow.Prefix, narrow.Provider)
+	_, remove := table.Select(routeAt())
+
+	if len(remove) != 1 || remove[0] != narrow.Prefix {
+		t.Fatalf("remove = %v, want only the specific prefix", remove)
+	}
+	installed := table.Installed()
+	if len(installed) != 1 || installed[0].Prefix != wide.Prefix {
+		t.Errorf("installed = %v, want the wider prefix still there", installed)
+	}
+}
+
+// A table starts empty, which is what a restart produces.
+//
+// The RIB is memory, deliberately: an announcement carries a validity, and
+// restoring one from disk would install a destination nobody has reaffirmed
+// since the process died. A restarted node learns again from the peers that are
+// still there.
+func TestARestartedTableRoutesNothingUntilItIsToldAgain(t *testing.T) {
+	before := NewRouteTable(0)
+	before.Offer(announced(t, "10.20.30.0/24", "provider-a", 10))
+	before.Select(routeAt())
+	if len(before.Installed()) != 1 {
+		t.Fatal("the first table installed nothing, so this proves nothing")
+	}
+
+	// What a restart leaves: a new table with no memory of the last one.
+	after := NewRouteTable(0)
+	if got := after.Installed(); len(got) != 0 {
+		t.Errorf("a fresh table claims %v; a restart must not resurrect routes", got)
+	}
+
+	install, remove := after.Select(routeAt())
+	if len(install) != 0 || len(remove) != 0 {
+		t.Errorf("a fresh table reported install=%v remove=%v, want nothing", install, remove)
+	}
+
+	// And it relearns from a peer that is still announcing.
+	after.Offer(announced(t, "10.20.30.0/24", "provider-a", 10))
+	if install, _ := after.Select(routeAt()); len(install) != 1 {
+		t.Error("a restarted table did not relearn a route it was offered again")
+	}
+}

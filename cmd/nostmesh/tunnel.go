@@ -115,6 +115,13 @@ func renderStatus(status orchestrator.Status, cfg config.Config, stdout *output)
 	for _, observed := range status.Interfaces {
 		stdout.printf("interface: %s (MTU %d, listen port %d)\n",
 			observed.Name, observed.MTU, observed.ListenPort)
+
+		// The forwarding table as the kernel holds it. A peer's AllowedIPs say
+		// what should be routed; this says what is, and the gap between them is
+		// the whole reason an operator runs this command.
+		for _, route := range observed.Routes {
+			stdout.printf("  route:   %s\n", route)
+		}
 	}
 
 	stdout.printf("\nconfigured peers: %d\n", len(status.Configured))

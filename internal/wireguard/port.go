@@ -97,6 +97,15 @@ type InterfaceState struct {
 	MTU        int
 	Peers      []PeerState
 	OwnedByUs  bool
+
+	// Routes are the destinations the kernel reaches through this interface.
+	//
+	// The forwarding table as it actually is, which is a different thing from
+	// what a peer's AllowedIPs say it should be. An operator asking why a
+	// subnet is unreachable needs the first; everything before this reported
+	// only the second, so an announced route that failed to install looked
+	// exactly like one that worked.
+	Routes []netip.Prefix
 }
 
 // PeerState is the observed state of a peer.

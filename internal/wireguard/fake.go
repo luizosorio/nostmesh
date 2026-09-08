@@ -321,7 +321,29 @@ func (f *FakeController) ObserveInterface(_ context.Context, name string) (Inter
 	// anything under test.
 	observed := *iface
 	observed.Peers = append([]PeerState(nil), iface.Peers...)
+
+	// Routes are held separately, as the kernel holds them, so the observation
+	// has to gather them the same way netlink does. A fake that reported none
+	// would let a test assert an interface carries no routes when it does.
+	observed.Routes = f.routesFor(name)
+
 	return observed, nil
+}
+
+// routesFor lists an interface's routes, sorted. The caller holds the lock.
+func (f *FakeController) routesFor(name string) []netip.Prefix {
+	if len(f.routes[name]) == 0 {
+		return nil
+	}
+
+	installed := make([]netip.Prefix, 0, len(f.routes[name]))
+	for prefix := range f.routes[name] {
+		installed = append(installed, prefix)
+	}
+	slices.SortFunc(installed, func(a, b netip.Prefix) int {
+		return strings.Compare(a.String(), b.String())
+	})
+	return installed
 }
 
 // ListOwnedInterfaces reports the simulated interfaces this project owns.
@@ -451,14 +473,7 @@ func (f *FakeController) Routes(name string) []netip.Prefix {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	installed := make([]netip.Prefix, 0, len(f.routes[name]))
-	for prefix := range f.routes[name] {
-		installed = append(installed, prefix)
-	}
-	slices.SortFunc(installed, func(a, b netip.Prefix) int {
-		return strings.Compare(a.String(), b.String())
-	})
-	return installed
+	return f.routesFor(name)
 }
 
 var _ Controller = (*FakeController)(nil)

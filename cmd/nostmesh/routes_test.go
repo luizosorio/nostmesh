@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/luizosorio/nostmesh/internal/config"
 	"github.com/luizosorio/nostmesh/internal/domain"
 	"github.com/luizosorio/nostmesh/internal/netstate"
+	"github.com/luizosorio/nostmesh/internal/orchestrator"
 	"github.com/luizosorio/nostmesh/internal/policy"
 	"github.com/luizosorio/nostmesh/internal/protocol"
 	"github.com/luizosorio/nostmesh/internal/wireguard"
@@ -325,5 +329,201 @@ func TestAnnouncementVersionsIncrease(t *testing.T) {
 	}
 	if second.ValidUntil <= first.ValidUntil {
 		t.Error("the refreshed announcement does not extend the validity")
+	}
+}
+
+// The routes a node installed are visible in what the service reports.
+//
+// The RIB is what this node decided; `nostmesh status` shows the kernel's own
+// table. An operator can only tell the two apart by reading both, and before
+// this neither reported a route at all.
+func TestInstalledRoutesAreReportedToTheOperator(t *testing.T) {
+	peer := testNostrKey(t, 140)
+	handler, _ := newTestRouteHandler(t, peer, "10.20.30.0/24")
+	ctx := context.Background()
+
+	if err := handler.Announce(ctx, peer, announcement("10.20.30.0/24")); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+	if err := handler.Reconcile(ctx, peer, "nm0"); err != nil {
+		t.Fatalf("reconciling: %v", err)
+	}
+
+	installed, conflicts := handler.Snapshot()
+	if len(installed) != 1 {
+		t.Fatalf("reported %d routes, want the one that was installed", len(installed))
+	}
+	if installed[0].Provider != peer {
+		t.Error("the reported route does not name the peer that offered it")
+	}
+	if installed[0].ExpiresAt.IsZero() {
+		t.Error("the reported route carries no validity; an operator cannot see when it lapses")
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("conflicts = %v, want none with a single provider", conflicts)
+	}
+}
+
+// A contested destination is reported, with the winner named.
+//
+// Only one route per prefix is installed, and an operator wondering why a
+// provider's offer is not in use needs to see that another won rather than that
+// theirs vanished.
+func TestAContestedDestinationIsReported(t *testing.T) {
+	winner := testNostrKey(t, 141)
+	loser := testNostrKey(t, 142)
+
+	list := policy.NewAllowlist()
+	for _, peer := range []domain.NostrPublicKey{winner, loser} {
+		if err := list.Add(policy.Grant{
+			Peer:       peer,
+			Actions:    []policy.Action{policy.ActionRoute},
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.20.30.0/24")},
+		}); err != nil {
+			t.Fatalf("granting: %v", err)
+		}
+	}
+
+	controller := wireguard.NewFakeController()
+	journal := netstate.NewJournalStore(t.TempDir())
+	manager := netstate.NewManager(controller, journal, stubClock{at: routeClock()()})
+	router := policy.NewRouter(list, domain.NewRouteTable(0), domain.LocalNetwork{})
+	handler := newRouteHandler(router, manager, routeClock(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx := context.Background()
+
+	// The better metric wins; both are recorded.
+	good := announcement("10.20.30.0/24")
+	good.Routes[0].Metric = 5
+	if err := handler.Announce(ctx, winner, good); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+	poor := announcement("10.20.30.0/24")
+	poor.Routes[0].Metric = 50
+	if err := handler.Announce(ctx, loser, poor); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+
+	_, conflicts := handler.Snapshot()
+	if len(conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want the contested destination", len(conflicts))
+	}
+	if len(conflicts[0].Offers) != 2 {
+		t.Errorf("offers = %d, want both providers visible", len(conflicts[0].Offers))
+	}
+}
+
+// A node that routes nothing reports nothing.
+//
+// The default, and the common case. Reporting an empty section on every node
+// that never announced anything is noise rather than information.
+func TestANodeRoutingNothingReportsNothing(t *testing.T) {
+	handler, _ := newTestRouteHandler(t, testNostrKey(t, 143), "10.20.30.0/24")
+
+	installed, conflicts := handler.Snapshot()
+	if len(installed) != 0 || len(conflicts) != 0 {
+		t.Errorf("a node with no routes reported %v / %v", installed, conflicts)
+	}
+}
+
+// status prints the routes the kernel holds for an interface.
+//
+// The FIB half of "RIB/FIB/status coherent". `nostmesh state` reports what the
+// node decided; this reports what the kernel actually has, and an operator can
+// only tell a route that failed to install from one that worked by reading both.
+//
+// renderStatus directly rather than the command: the command needs a kernel and
+// skips without one, and a guard that skips in CI is not a guard.
+func TestStatusPrintsTheKernelRoutes(t *testing.T) {
+	var printed bytes.Buffer
+	out := &output{w: &printed}
+
+	status := orchestrator.Status{
+		Interfaces: []wireguard.InterfaceState{{
+			Name:       "nm-abc12345",
+			MTU:        1420,
+			ListenPort: 51820,
+			Routes: []netip.Prefix{
+				netip.MustParsePrefix("10.20.30.0/24"),
+				netip.MustParsePrefix("10.40.0.0/16"),
+			},
+		}},
+	}
+
+	if code := renderStatus(status, config.Default(), out); code != exitOK {
+		t.Fatalf("render returned %d", code)
+	}
+
+	rendered := printed.String()
+	for _, want := range []string{"10.20.30.0/24", "10.40.0.0/16"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("status does not report route %s:\n%s", want, rendered)
+		}
+	}
+}
+
+// An interface carrying no routes prints none, rather than an empty heading.
+func TestStatusPrintsNoRoutesWhenThereAreNone(t *testing.T) {
+	var printed bytes.Buffer
+	out := &output{w: &printed}
+
+	status := orchestrator.Status{
+		Interfaces: []wireguard.InterfaceState{{Name: "nm-abc12345", MTU: 1420}},
+	}
+
+	if code := renderStatus(status, config.Default(), out); code != exitOK {
+		t.Fatalf("render returned %d", code)
+	}
+	if strings.Contains(printed.String(), "route:") {
+		t.Errorf("status mentions routes for an interface that has none:\n%s", printed.String())
+	}
+}
+
+// The service reports its routes to the operator.
+//
+// Through service.snapshot, which is what `nostmesh state` reads — not through
+// the handler directly. A test that asked the handler would pass with the
+// service never wired to it, which is exactly the defect this closes: the RIB
+// existed and nothing reported it.
+func TestTheServiceReportsItsRoutes(t *testing.T) {
+	peer := testNostrKey(t, 150)
+	handler, _ := newTestRouteHandler(t, peer, "10.20.30.0/24")
+	ctx := context.Background()
+
+	if err := handler.Announce(ctx, peer, announcement("10.20.30.0/24")); err != nil {
+		t.Fatalf("announcing: %v", err)
+	}
+	if err := handler.Reconcile(ctx, peer, "nm0"); err != nil {
+		t.Fatalf("reconciling: %v", err)
+	}
+
+	cfg, path := writeServiceConfig(t, peer, false)
+	svc := testService(t, cfg, path)
+	svc.super.routes = handler
+
+	state := svc.snapshot()
+	if len(state.Routes) != 1 {
+		t.Fatalf("state reports %d routes, want the one installed", len(state.Routes))
+	}
+	if state.Routes[0].Prefix != "10.20.30.0/24" {
+		t.Errorf("prefix = %q, want the announced destination", state.Routes[0].Prefix)
+	}
+	if state.Routes[0].Provider != peer.Short() {
+		t.Errorf("provider = %q, want the peer that offered it", state.Routes[0].Provider)
+	}
+	if state.Routes[0].Expires == "" {
+		t.Error("no validity reported; an operator cannot see when the route lapses")
+	}
+}
+
+// A service routing nothing reports no route section at all.
+func TestTheServiceReportsNoRoutesWhenItHasNone(t *testing.T) {
+	peer := testNostrKey(t, 151)
+	cfg, path := writeServiceConfig(t, peer, false)
+	svc := testService(t, cfg, path)
+
+	state := svc.snapshot()
+	if len(state.Routes) != 0 || len(state.Conflicts) != 0 {
+		t.Errorf("a service with no routes reported %v / %v", state.Routes, state.Conflicts)
 	}
 }
