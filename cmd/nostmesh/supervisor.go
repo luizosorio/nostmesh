@@ -124,6 +124,20 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		maxAttempting = defaultMaxSessions
 	}
 
+	// Persisted, so a restart does not forget what this node answered. A node
+	// with a durable identity keeps the same inbox filter and will meet its own
+	// retained events again; without this it answers them as though new.
+	answered, err := orchestrator.NewAnsweredSessions(clock.Now).
+		WithStore(newAnsweredStore(cfg.Node.StateDir))
+	if err != nil {
+		// Not fatal. A node that cannot read the record answers a replayed
+		// session at worst; refusing to start would take it down over a file.
+		log.Warn("the answered-session record could not be read",
+			observability.Event("service.answered.unreadable"),
+			observability.Result(observability.ResultDegraded),
+			slog.String("error", err.Error()))
+	}
+
 	routes, err := buildRouteHandler(cfg, netManager, clock, log)
 	if err != nil {
 		_ = closeController()
@@ -136,7 +150,7 @@ func newSupervisor(cfg config.Config, log *slog.Logger) (*supervisor, error) {
 		closeController: closeController,
 		manager:         manager,
 		netstate:        netManager,
-		answered:        orchestrator.NewAnsweredSessions(clock.Now),
+		answered:        answered,
 		routes:          routes,
 		slots:           make(map[domain.NostrPublicKey]peerSlot),
 		maxAttempting:   maxAttempting,

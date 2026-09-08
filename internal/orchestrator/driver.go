@@ -186,6 +186,27 @@ type AnsweredSessions struct {
 	mu   sync.Mutex
 	seen map[domain.SessionID]time.Time
 	now  func() time.Time
+
+	// store persists the record across restarts. Optional: without one the
+	// record is memory, which is correct for a caller that builds a driver per
+	// attempt and wrong for a long-running node — see WithStore.
+	store AnsweredStore
+}
+
+// AnsweredStore keeps the answered-session record across restarts.
+//
+// A port rather than a file, so the orchestrator stays free of the filesystem.
+// The record is what stops a node answering a session it already finished, and
+// holding it only in memory means a restart forgets everything: a node with a
+// durable identity then meets its own retained events on the relays and treats
+// them as new. See #59.
+type AnsweredStore interface {
+	// Load reads what was answered before this process started. A missing
+	// record is not an error — a node that never ran has answered nothing.
+	Load() (map[domain.SessionID]time.Time, error)
+
+	// Save writes the current record.
+	Save(map[domain.SessionID]time.Time) error
 }
 
 // NewAnsweredSessions builds an empty record.
@@ -194,6 +215,29 @@ func NewAnsweredSessions(now func() time.Time) *AnsweredSessions {
 		now = time.Now
 	}
 	return &AnsweredSessions{seen: make(map[domain.SessionID]time.Time), now: now}
+}
+
+// WithStore persists the record, loading whatever a previous run left.
+//
+// A failure to load is reported and not fatal: a node that cannot read the
+// record answers a replayed session at worst, where refusing to start would
+// take the node down over a file. The caller decides what to do with the error.
+func (a *AnsweredSessions) WithStore(store AnsweredStore) (*AnsweredSessions, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.store = store
+
+	loaded, err := store.Load()
+	if err != nil {
+		return a, err
+	}
+	for sessionID, at := range loaded {
+		a.seen[sessionID] = at
+	}
+	a.evict()
+
+	return a, nil
 }
 
 // Contains reports whether a session has been answered.
@@ -221,6 +265,13 @@ func (a *AnsweredSessions) Add(sessionID domain.SessionID) {
 
 	a.evict()
 	a.seen[sessionID] = a.now()
+
+	// Written on every addition rather than at shutdown: a node that crashes
+	// mid-session is exactly the one that will meet its own replayed request on
+	// restart, and a record saved only on a clean exit would be empty then.
+	if a.store != nil {
+		_ = a.store.Save(a.seen)
+	}
 }
 
 // evict forgets sessions old enough that a relay will no longer replay them.
