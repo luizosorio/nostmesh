@@ -250,8 +250,20 @@ dist-packages: $(DIST)/nostmesh.service
 	done
 	@rm -f bin/$(BINARY)
 
-# The version a package carries. Debian and RPM both refuse a leading "v", so
-# the tag's is stripped here rather than in every caller.
+# The version a package carries.
+#
+# Debian and RPM both refuse a leading "v", so the tag's is stripped. The "-" of
+# a pre-release tag stays a "-" rather than becoming "~", because GitHub rejects
+# "~" in a release asset name and silently rewrites it to "." — which leaves the
+# published filenames disagreeing with SHA256SUMS, so `sha256sum -c` matches
+# nothing and reports "no file was verified".
+#
+# The cost is ordering: "0.2.4-1b" is read by dpkg as revision 1b *of* 0.2.4 and
+# sorts after it, where "0.2.4~1b" would sort before. That matters when a
+# package manager compares a pre-release against the final version, which is not
+# something this project's artifacts are installed through — they are downloaded
+# from a release page. A verifiable checksum is worth more than an ordering
+# nobody queries.
 PKG_VERSION ?= $(patsubst v%,%,$(VERSION))
 
 # One file listing every artifact, which is what a user verifies against.
