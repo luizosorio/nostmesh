@@ -425,6 +425,27 @@ func (f *FakeController) HasRoute(_ context.Context, name string, prefix netip.P
 	return f.routes[name][prefix.Masked()], nil
 }
 
+// ResetCalls clears the recorded calls under the lock.
+//
+// Assigning to Calls directly races with a controller being used concurrently,
+// and a lost append makes a test assert against a record that was never
+// complete — which reads as the code being quiet when it was not. A guard
+// planted against exactly that passed until this existed.
+func (f *FakeController) ResetCalls() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.Calls = nil
+}
+
+// RecordedCalls returns a copy of what was invoked, in order.
+func (f *FakeController) RecordedCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.Calls)
+}
+
 // Routes reports what a test installed, so assertions do not reach inside.
 func (f *FakeController) Routes(name string) []netip.Prefix {
 	f.mu.Lock()

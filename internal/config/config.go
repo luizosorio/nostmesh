@@ -28,6 +28,31 @@ type Config struct {
 	// using the manually chosen node.overlay_address, which is what every
 	// deployment before this did and must keep doing.
 	Network Network `toml:"network" json:"network,omitempty"`
+
+	// Routes configures what this node announces to its peers.
+	Routes Routes `toml:"routes" json:"routes,omitempty"`
+}
+
+// Routes says which private prefixes this node offers to reach.
+//
+// Empty by default: a node announces nothing unless its operator says it can
+// reach something. What a peer does with an announcement is entirely that
+// peer's decision — this is a claim, never an instruction (NM-25).
+type Routes struct {
+	// Advertise lists the prefixes this node offers to route.
+	//
+	// Local intent. The operator is stating what this host can actually reach,
+	// and getting it wrong announces a destination that black-holes rather than
+	// one that is refused, so it is deliberately not derived from the host's
+	// interfaces: a node that announced whatever it happened to see would offer
+	// its own LAN to strangers by default.
+	Advertise []string `toml:"advertise" json:"advertise,omitempty"`
+
+	// Metric is what this node claims about its own cost to those prefixes.
+	//
+	// A claim about itself, which the receiver treats as one input among
+	// several. Zero takes a default rather than meaning "free".
+	Metric uint32 `toml:"metric" json:"metric,omitempty"`
 }
 
 // Network configures a node's membership of an overlay network.

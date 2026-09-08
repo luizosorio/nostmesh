@@ -165,6 +165,7 @@ func buildSessionRuntime(ctx context.Context, cfg config.Config, peer domain.Nos
 		Gatherer:   gatherer,
 		Clock:      clock,
 		Answered:   super.answered,
+		Routes:     super.routes,
 		Logger:     log,
 	}, options)
 	if err != nil {

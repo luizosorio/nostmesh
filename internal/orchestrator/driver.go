@@ -72,6 +72,38 @@ type Publisher interface {
 	BindSession(sessionID string) error
 }
 
+// RouteHandler carries announcements between a session and the routing table.
+//
+// A port rather than the routing table itself, for the same reason the driver
+// takes a Publisher rather than a relay: the driver sequences a session and
+// must not know how a route is decided or installed. It reports what a peer
+// said and applies what it is told.
+//
+// Optional. A driver without one holds a tunnel exactly as before, which is
+// what a node that routes nothing needs.
+type RouteHandler interface {
+	// Announce reports prefixes a peer offered. What comes back is what this
+	// node decided, which may be nothing.
+	Announce(ctx context.Context, peer domain.NostrPublicKey, announce protocol.RouteAnnounce) error
+
+	// Withdraw reports prefixes a peer retracted.
+	Withdraw(ctx context.Context, peer domain.NostrPublicKey, withdraw protocol.RouteWithdraw) error
+
+	// Reconcile applies expiry and selection, installing and removing what
+	// changed. Called on the hold loop's tick, so a route lapses without anyone
+	// having to say so.
+	Reconcile(ctx context.Context, peer domain.NostrPublicKey, iface string) error
+
+	// Release drops everything a peer offered, when its session ends.
+	Release(ctx context.Context, peer domain.NostrPublicKey, iface string) error
+
+	// Advertise returns what this node offers to reach, or nil if it offers
+	// nothing. Called on the hold loop so a refreshed announcement replaces one
+	// about to expire, which is what keeps a route alive without a peer having
+	// to ask.
+	Advertise() *protocol.RouteAnnounce
+}
+
 // Delivery is one control message and the conversation it belongs to.
 //
 // The session travels with the message rather than being read back from the
@@ -119,8 +151,11 @@ type Driver struct {
 	keys      keyGenerator
 	transport Transport
 	publisher Publisher
-	receiver  Receiver
-	gatherer  *connectivity.Gatherer
+
+	// routes decides what an announcement does, when a caller supplied one.
+	routes   RouteHandler
+	receiver Receiver
+	gatherer *connectivity.Gatherer
 
 	// pending holds messages that arrived before the step consuming them.
 	pendingMu sync.Mutex
@@ -322,6 +357,10 @@ type DriverDeps struct {
 	// that builds a driver per attempt must supply the same record each time,
 	// or the responder forgets what it answered and repeats itself.
 	Answered *AnsweredSessions
+
+	// Routes carries announcements to and from the routing table. Optional: a
+	// driver without one holds a tunnel and routes nothing announced.
+	Routes RouteHandler
 }
 
 // NewDriver builds a Driver.
@@ -375,6 +414,7 @@ func NewDriver(deps DriverDeps, opts DriverOptions) (*Driver, error) {
 		keys:       deps.Keys,
 		transport:  deps.Transport,
 		publisher:  deps.Publisher,
+		routes:     deps.Routes,
 		receiver:   deps.Receiver,
 		gatherer:   deps.Gatherer,
 		answered:   deps.Answered,
@@ -783,6 +823,130 @@ func (d *Driver) awaitAccept(ctx context.Context, offeredAt time.Time, offerHash
 // and the peer may be hours away from being ready. Nothing shorter than the
 // caller's own cancellation should end that wait.
 const Unbounded = -1 * time.Second
+
+// drainRouteMessages hands the peer's queued announcements to the handler.
+//
+// Reads what awaitMessage already held rather than calling the receiver: the
+// hold loop must not block waiting for a message that may never come, and a
+// route message arriving during negotiation is queued by the same mechanism
+// that queues an early candidate update.
+//
+// Failures are logged and the loop continues. A route that could not be applied
+// is a route this node does not have, which is the safe outcome; ending a
+// working session over it would be worse than not routing.
+func (d *Driver) drainRouteMessages(ctx context.Context, peer domain.NostrPublicKey) {
+	if d.routes == nil {
+		return
+	}
+
+	for _, delivery := range d.takeHeld(protocol.TypeRouteAnnounce) {
+		if delivery.Payload.RouteAnnounce == nil {
+			continue
+		}
+		if err := d.routes.Announce(ctx, peer, *delivery.Payload.RouteAnnounce); err != nil {
+			d.log.Warn("an announcement was not applied",
+				observability.Event("route.announce.failed"),
+				observability.Peer(peer),
+				observability.Result(observability.ResultFailed),
+				slog.String("error", err.Error()))
+		}
+	}
+
+	for _, delivery := range d.takeHeld(protocol.TypeRouteWithdraw) {
+		if delivery.Payload.RouteWithdraw == nil {
+			continue
+		}
+		if err := d.routes.Withdraw(ctx, peer, *delivery.Payload.RouteWithdraw); err != nil {
+			d.log.Warn("a withdrawal was not applied",
+				observability.Event("route.withdraw.failed"),
+				observability.Peer(peer),
+				observability.Result(observability.ResultFailed),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// advertiseRoutes republishes what this node offers, before the last one lapses.
+//
+// Refreshed rather than sent once: an announcement carries a validity, and a
+// peer drops the route when it passes. Sending only at establishment would make
+// every route disappear one validity later, on a tunnel that never stopped
+// working.
+//
+// The interval is a fraction of the validity so a single lost message does not
+// let the route lapse. A failure is logged and retried on the next tick.
+func (d *Driver) advertiseRoutes(ctx context.Context, peer domain.NostrPublicKey, last *time.Time) {
+	if d.routes == nil {
+		return
+	}
+
+	announce := d.routes.Advertise()
+	if announce == nil {
+		return
+	}
+
+	// The injected clock, never time.Until: the domain must not read the host
+	// clock directly, or a test cannot advance time without waiting for it.
+	validity := time.Unix(announce.ValidUntil, 0).Sub(d.clock.Now())
+	if validity <= 0 {
+		return
+	}
+	// Two refreshes inside one validity, so losing one message does not drop
+	// the route at the far end.
+	interval := validity / 2
+
+	if !last.IsZero() && d.clock.Now().Sub(*last) < interval {
+		return
+	}
+
+	if err := d.publisher.Publish(ctx, protocol.TypeRouteAnnounce, 0,
+		protocol.Payload{RouteAnnounce: announce}); err != nil {
+		d.log.Warn("an announcement was not published",
+			observability.Event("route.advertise.failed"),
+			observability.Peer(peer),
+			observability.Result(observability.ResultFailed),
+			slog.String("error", err.Error()))
+		return
+	}
+
+	*last = d.clock.Now()
+	d.log.Debug("routes advertised",
+		observability.Event("route.advertised"),
+		observability.Peer(peer),
+		slog.Int("prefixes", len(announce.Routes)))
+}
+
+// reconcileRoutes applies expiry and selection.
+//
+// Every tick, not only when a message arrived: an offer lapses on its own
+// validity, and a node that reconciled only on delivery would hold a route
+// whose provider stopped talking — which is the case the validity exists for.
+func (d *Driver) reconcileRoutes(ctx context.Context, peer domain.NostrPublicKey) {
+	if d.routes == nil {
+		return
+	}
+
+	if err := d.routes.Reconcile(ctx, peer, d.options.InterfaceName); err != nil {
+		d.log.Warn("routes were not reconciled",
+			observability.Event("route.reconcile.failed"),
+			observability.Peer(peer),
+			observability.Result(observability.ResultFailed),
+			slog.String("error", err.Error()))
+	}
+}
+
+// takeHeld removes and returns every held message of one type.
+func (d *Driver) takeHeld(kind protocol.MessageType) []Delivery {
+	d.pendingMu.Lock()
+	defer d.pendingMu.Unlock()
+
+	held := d.pending[kind]
+	if len(held) == 0 {
+		return nil
+	}
+	delete(d.pending, kind)
+	return held
+}
 
 // awaitMessage waits for one message type, holding onto the others.
 //
@@ -1234,8 +1398,9 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 	defer ticker.Stop()
 
 	var (
-		failures int
-		previous wireguard.PeerState
+		failures       int
+		previous       wireguard.PeerState
+		lastAdvertised time.Time
 	)
 	for {
 		select {
@@ -1288,6 +1453,14 @@ func (d *Driver) Hold(ctx context.Context, peer domain.NostrPublicKey, onPoll fu
 		// down rather than followed, since writing kernel state for a tunnel
 		// about to be removed helps nobody.
 		d.followRoam(ctx, peer, observed)
+
+		// Announcements this peer sent while the tunnel was up, then expiry and
+		// selection. Both on the same tick, and both after the staleness check
+		// for the same reason as the roam: a route installed for a session
+		// about to end is work nobody wanted.
+		d.drainRouteMessages(ctx, peer)
+		d.reconcileRoutes(ctx, peer)
+		d.advertiseRoutes(ctx, peer, &lastAdvertised)
 
 		if onPoll != nil {
 			onPoll(observed)
@@ -1399,6 +1572,20 @@ func (d *Driver) Release(ctx context.Context, peer domain.NostrPublicKey) error 
 	// cancellation is how a port stays claimed after the service stops.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
 	defer cancel()
+
+	// Before the interface goes, so the routing table stops claiming
+	// destinations this node can no longer reach. Removing the interface takes
+	// its routes with it in the kernel, but the table would still name them,
+	// and the next session would then think they were already installed.
+	if d.routes != nil {
+		if err := d.routes.Release(ctx, peer, d.options.InterfaceName); err != nil {
+			d.log.Warn("routes were not released",
+				observability.Event("route.release.failed"),
+				observability.Peer(peer),
+				observability.Result(observability.ResultFailed),
+				slog.String("error", err.Error()))
+		}
+	}
 
 	err := d.netstate.Remove(ctx, d.options.InterfaceName)
 	_ = d.manager.Close(peer)
