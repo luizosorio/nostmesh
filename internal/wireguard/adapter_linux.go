@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -507,6 +508,7 @@ func (a *LinuxAdapter) ObserveInterface(ctx context.Context, iface string) (Inte
 	if err == nil {
 		state.MTU = link.Attrs().MTU
 		state.Addresses = observedAddresses(link)
+		state.Routes = observedRoutes(link)
 	}
 
 	for _, peer := range device.Peers {
@@ -531,6 +533,39 @@ func observedAddresses(link netlink.Link) []netip.Prefix {
 			prefixes = append(prefixes, netip.PrefixFrom(prefix.Unmap(), ones))
 		}
 	}
+	return prefixes
+}
+
+// observedRoutes reports what the kernel routes through this interface.
+//
+// Read from the kernel rather than derived from the peers' AllowedIPs: the two
+// agree when everything worked, and the whole point of reporting this is the
+// case where they do not.
+func observedRoutes(link netlink.Link) []netip.Prefix {
+	routes, err := netlink.RouteList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return nil
+	}
+
+	var prefixes []netip.Prefix
+	for _, route := range routes {
+		// A route with no destination is the default route, which this project
+		// never installs (NM-09). Reporting one would describe something that
+		// did not come from here.
+		if route.Dst == nil {
+			continue
+		}
+		addr, ok := netip.AddrFromSlice(route.Dst.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := route.Dst.Mask.Size()
+		prefixes = append(prefixes, netip.PrefixFrom(addr.Unmap(), ones))
+	}
+
+	slices.SortFunc(prefixes, func(a, b netip.Prefix) int {
+		return strings.Compare(a.String(), b.String())
+	})
 	return prefixes
 }
 
