@@ -6,6 +6,20 @@
 name: nostmesh
 arch: ${PKG_ARCH}
 version: ${PKG_VERSION}
+
+# Take the version literally rather than parsing it as SemVer.
+#
+# Left to itself, nfpm reads the "-1b" of a pre-release tag and renders it
+# "~1b", which is correct Debian ordering and unusable here: GitHub rejects "~"
+# in a release asset name and rewrites it to ".", leaving the published
+# filenames disagreeing with SHA256SUMS. `sha256sum -c` then verifies nothing
+# and says so.
+#
+# The cost is ordering — dpkg reads 0.2.4-1b as revision 1b *of* 0.2.4 and sorts
+# it after, where 0.2.4~1b would sort before. These artifacts are downloaded
+# from a release page rather than resolved by a package manager, so an ordering
+# nobody queries is worth less than a checksum anybody can check.
+version_schema: none
 section: net
 priority: optional
 maintainer: NostMesh maintainers <noreply@users.noreply.github.com>

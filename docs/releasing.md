@@ -49,22 +49,27 @@ write permission, and it writes exactly the release.
 comes after the hyphen is a pre-release identifier. `v0.2.4-2b` is a step
 towards `v0.2.4`; `v0.2.4` is the delivery.
 
-The package versions say the same thing. nfpm renders `v0.2.4-2b` as
-`0.2.4~2b`, and `~` orders *before* a plain version in both Debian and RPM — so
-every pre-release loses to `0.2.4` when a package manager compares them. Written
-with a hyphen instead, the package would be read as a *revision* of 0.2.4 and
-would order after it, inverting the intent.
+**The package version keeps the hyphen.** Left to itself nfpm would render
+`0.2.4-2b` as `0.2.4~2b`, which is the correct Debian spelling for a
+pre-release — `~` sorts before a plain version, so `0.2.4~2b` loses to `0.2.4`
+as it should.
 
-Verified rather than assumed:
+It is not used, because **GitHub rejects `~` in a release asset name and
+rewrites it to `.`**. The file is built as `nostmesh_0.2.4~2b_amd64.deb`,
+published as `nostmesh_0.2.4.1b_amd64.deb`, and `SHA256SUMS` still lists the
+name it was built with — so `sha256sum -c` matches nothing and reports "no file
+was verified". A checksum nobody can check is worse than no checksum, because it
+looks like verification.
 
-```
-0.2.4~1b < 0.2.4~2b     ok
-0.2.4~2b < 0.2.4~10b    ok    (compared as a number, not as text)
-0.2.4~10b < 0.2.4       ok
-```
+This was found by publishing `v0.2.4-1b` and checking the result rather than
+assuming it. `version_schema: none` in `packaging/nfpm.yaml` now keeps the
+version literal, and `dist-verify` refuses any filename containing `~`.
 
-Git references cannot contain `~`, which is why the tag uses `-` and the
-package `~`.
+The trade is ordering: dpkg reads `0.2.4-1b` as revision `1b` *of* `0.2.4` and
+sorts it **after**. That matters when a package manager compares versions, which
+is not how these artifacts are consumed — they are downloaded from a release
+page. An ordering nobody queries is worth less than a checksum anybody can
+check.
 
 ## What `dist-verify` checks
 

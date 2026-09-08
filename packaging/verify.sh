@@ -60,6 +60,18 @@ tar -tzf "$archive" | grep -q './nostmesh' || fail "$archive: no binary"
 # Its presence and size are what is asserted here.
 [ -s "$rpm" ] || fail "$rpm is empty"
 
+# The published filename has to be the one SHA256SUMS lists. GitHub rejects "~"
+# in a release asset name and rewrites it to ".", so a package built as
+# 0.2.4~1b is published as 0.2.4.1b — and `sha256sum -c` then matches nothing
+# and reports "no file was verified". A checksum nobody can check is worse than
+# no checksum, because it looks like verification.
+case "$deb" in
+    *'~'*) fail "$deb: '~' in the filename; GitHub will rewrite it and break SHA256SUMS" ;;
+esac
+case "$rpm" in
+    *'~'*) fail "$rpm: '~' in the filename; GitHub will rewrite it and break SHA256SUMS" ;;
+esac
+
 echo "$(basename "$deb"): ok"
 echo "$(basename "$rpm"): present"
 echo "$(basename "$archive"): ok"
