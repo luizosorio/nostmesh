@@ -1,245 +1,216 @@
 # NostMesh
 
-A decentralized overlay network that uses **Nostr** for identity, discovery and
-negotiation, and **WireGuard** to carry packets between nodes.
+Connect your machines over an encrypted tunnel, without a company in the middle.
 
-The goal is to let two machines establish an authenticated tunnel — even behind
-NAT — without depending on a proprietary coordinator. Later stages add mesh
-topologies, private route announcements, data relays, and a transit market for
-Internet access, free or paid over Bitcoin Lightning.
+NostMesh uses **Nostr** to let your devices find each other and agree on how to
+connect, and **WireGuard** to carry the traffic. There is no coordinator to sign
+up for, no account, and no server that has to stay online for your network to
+work.
 
-> **Status: early development.** MVP 0 is in progress. This is not yet a usable
-> product, and it makes no claim of anonymity. See [Scope](#scope) for what
-> NostMesh is not.
+> **Early development.** MVP 2 is complete: several machines, local policy, and
+> private route announcements. It has not been audited — do not use it to
+> protect anything that matters yet, and it makes no claim of anonymity.
 
-## How it works
+## What you can do with it today
 
-Two planes, deliberately kept apart:
+- Connect several machines of your own into one private network
+- Share one machine with somebody else, and nothing more
+- Reach a whole home or office network through one machine on it
+- Decide, per machine, exactly who may connect and what they may reach
 
-```text
-                    CONTROL PLANE
-        Nostr relays (signed, encrypted events)
-       identity • discovery • offers • negotiation
-                         │
-              ┌──────────┴──────────┐
-              │                     │
-           node A                node B / gateway
-              ╲                     ╱
-               ╲  WireGuard/UDP    ╱
-                ═══════════════════
-                     DATA PLANE
-              direct, or via a data relay
-```
-
-Nostr never carries user IP packets. It helps nodes find each other,
-authenticate, and agree on temporary parameters. Useful traffic goes over
-WireGuard. STUN and ICE-like connectivity checks look for a direct path; a data
-relay is the fallback.
-
-## Non-negotiable principles
-
-These are invariants, not guidelines. They are not traded away for convenience
-or deadline:
-
-- Nostr identity keys are **never** reused as WireGuard keys.
-- Only the WireGuard **public** key travels in encrypted signaling. The private
-  key never leaves the node that generated it — not in events, logs, the network
-  journal, or diagnostic bundles.
-- Events are **proposals, not commands**. `AllowedIPs`, routes, DNS and firewall
-  rules are derived from local policy, never from a remote field.
-- Every policy decision is **deny by default**.
-- Network changes are **transactional, idempotent and reversible**. NostMesh
-  never removes a rule it does not own.
-- A third-party candidate stays `UNVERIFIED` until an authenticated connectivity
-  check validates it.
-- Auxiliary roles — Nostr relay, STUN observer, data relay, exit provider — are
-  independent. Enabling one never grants another.
-- An exit node does not mean anonymity. The provider sees metadata and carries
-  real legal risk.
-
-## Scope
-
-**NostMesh is not** Tor: it builds no layered circuits and does not promise to
-hide who connects to whom. It is not a cryptocurrency or a blockchain. It does
-not tunnel IP packets inside Nostr events. It does not remove legal
-responsibility from an operator who shares their connection.
-
-Out of scope for now: Windows, macOS, Android and iOS; onion routing; global
-consensus; post-payment or fund custody.
+Your traffic goes directly between machines. Nostr relays only carry the
+"hello, here is how to reach me" part — they never see what you send.
 
 ## Installing
 
-NostMesh is a single static binary. Put it on your `PATH` and run it — there is
-nothing else to install, no runtime, no container.
+Download the package for your system from the
+[releases page](https://github.com/luizosorio/nostmesh/releases):
 
 ```bash
+# Debian, Ubuntu
+sudo dpkg -i nostmesh_0.2.4_amd64.deb
+
+# Fedora, RHEL, openSUSE
+sudo rpm -i nostmesh-0.2.4-1.x86_64.rpm
+```
+
+Or the standalone binary, which needs nothing else installed:
+
+```bash
+tar xzf nostmesh_v0.2.4_linux_amd64.tar.gz
 sudo install -m 0755 nostmesh /usr/local/bin/
-nostmesh version
 ```
 
-Requirements on the machine that runs it:
-
-- Linux with the `wireguard` kernel module (`sudo modprobe wireguard`)
-- `CAP_NET_ADMIN` for the commands that change network state
-
-`wg`, `wg-quick` and `nft` do **not** need to be installed. NostMesh configures
-the kernel directly over netlink rather than driving external tools.
-
-> Prebuilt binaries are not published yet — MVP 0 is still in progress. Until
-> then, build from source with the instructions below.
-
-## Building from source
+Both `amd64` and `arm64` are published. Every release ships a `SHA256SUMS` file
+worth checking:
 
 ```bash
-git clone git@github.com:luizosorio/nostmesh.git
-cd nostmesh
-make build            # produces bin/nostmesh
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-That needs a local Go 1.25 toolchain. If you would rather not install one,
-every target also runs in a container with a `docker-` prefix:
+**One prerequisite:** the WireGuard kernel module.
 
 ```bash
-make docker-build
-make docker-check     # format, vet, tests, portability guard
+sudo modprobe wireguard
+echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf
 ```
 
-Containers are how this project develops and tests, not how it ships. See
-[docs/development.md](docs/development.md).
+You do **not** need `wg`, `wg-quick` or `nft`. NostMesh talks to the kernel
+directly.
 
-### Try it
+## Getting started
+
+### 1. Create this machine's identity
 
 ```bash
-nostmesh version
-nostmesh config validate examples/nostmesh.json
-
-nostmesh identity init --state-dir ./state    # generate this node's identity
-nostmesh identity import --state-dir ./state  # or adopt one you already have
-nostmesh peer add --config nostmesh.json ...  # describe the other side
-sudo nostmesh up --config nostmesh.json       # bring the tunnel up
-nostmesh status --config nostmesh.json        # configured vs. observed
-sudo nostmesh down --config nostmesh.json     # remove what NostMesh applied
+sudo -u nostmesh nostmesh identity init --state-dir /var/lib/nostmesh
 ```
 
-That is the manual path, where the operator supplies the endpoint. To have two
-nodes find each other over Nostr instead, run the service on both:
+It prints a public key. That is what you give other people so they can authorize
+you — it is not a secret. The private half stays on this machine and never
+leaves it.
+
+### 2. Write a configuration
+
+Start from an example:
 
 ```bash
-sudo nostmesh serve --config nostmesh.json      # hold a session with every
-                                                # authorized peer
-nostmesh state --config nostmesh.json           # what the service is doing
+sudo cp /etc/nostmesh/nostmesh.json.example /etc/nostmesh/nostmesh.json
+sudo nano /etc/nostmesh/nostmesh.json
 ```
 
-Either side may open a session at any time and the other answers, so `serve` runs
-until it is stopped. `examples/nostmesh.service` runs it under systemd, where
-`systemctl reload` authorizes or revokes a peer without dropping the tunnels that
-are working.
+The [example configurations](examples/scenarios/) cover the common setups —
+your own machines, sharing with one person, reaching a home network. Pick the
+closest one.
 
-For a walk-through of establishing a tunnel between two hosts, see the
-[manual tunnel tutorial](docs/tutorial-manual-tunnel.md) and the
-[Nostr tunnel tutorial](docs/tutorial-nostr-tunnel.md).
+Check it before starting anything:
 
-Configuration is declarative and validated before it can influence anything.
-Invalid input fails with a message naming the field and stating what is
-required — and reports every problem at once, not one per run:
-
-```
-$ nostmesh config validate broken.json
-invalid configuration: 2 problems found:
-  - node.state_dir: must be an absolute path, got "relative/path"
-  - policy.default_action: must be "deny"; allow-by-default is not supported, got "allow"
+```bash
+nostmesh config validate /etc/nostmesh/nostmesh.json
 ```
 
-## Architecture
+### 3. Start it
 
-A **single, self-contained binary**. The CLI, the daemon and the auxiliary
-service roles are subcommands of the same executable. It links statically, needs
-no runtime dependencies, and never shells out to `wg`, `nft` or `ip` — network
-state is applied directly through the kernel over netlink.
-
-This is what makes installation a file copy: one binary, no runtime, no package
-tree, nothing to keep in version lockstep on the host.
-
-Dependencies point inward:
-
-```text
-cmd/nostmesh/             CLI and daemon entrypoint
-internal/domain/          pure types and state machines
-internal/protocol/        envelopes, codec, validation
-internal/policy/          local authorization
-internal/config/          declarative configuration
-internal/wireguard/       port + platform adapters
-internal/netstate/        routes, firewall, DNS, journal
-...
-test/architecture/        dependency rules, enforced by test
+```bash
+sudo systemctl enable --now nostmesh
 ```
 
-`internal/domain`, `internal/protocol`, `internal/policy` and `internal/config`
-form the core and must not import an operating system package, `syscall`, or any
-adapter. This is not a convention — `test/architecture` fails the build when it
-is violated, and CI cross-compiles for Windows and macOS to prove the core stays
-portable long before adapters for them exist.
+### 4. See whether it worked
 
-Decisions are recorded as ADRs in [`docs/adr/`](docs/adr/), numbered `NM-01`
-onward. Changing one means writing a new ADR that supersedes it, never editing
-history.
+```bash
+nostmesh state --config /etc/nostmesh/nostmesh.json
+```
 
-## Handling of keys
+If something is wrong, this usually says what:
 
-Two secrets exist, with different lifetimes and different consequences if they
-leak. They are separate types, and neither can be printed, logged or serialized
-by accident: every path that would normally reveal a value yields `[REDACTED]`
-instead, and JSON encoding fails outright rather than emitting a placeholder
-that looks like data.
+```bash
+nostmesh doctor --config /etc/nostmesh/nostmesh.json
+```
 
-There is exactly one sanctioned way to get raw key material out, reserved for
-the development keystore, and an architecture test fails the build if anything
-else calls it. See [NM-06](docs/adr/NM-06-key-separation-and-secret-handling.md).
+## Commands
 
-The file keystore writes the key to disk unprotected and is for development
-only. Production deployments are expected to use an external signer that never
-surrenders the private key.
+| Command | What it does |
+|---|---|
+| `nostmesh doctor` | Checks everything a working tunnel needs, and names what is missing |
+| `nostmesh state` | What the running service is doing — peers, sessions, routes |
+| `nostmesh status` | What the kernel actually has: interfaces, addresses, routes |
+| `nostmesh policy explain --peer <key>` | Why a particular peer can or cannot connect |
+| `nostmesh config validate <file>` | Every problem in a configuration file, not just the first |
+| `nostmesh identity init` | Creates this machine's identity |
+| `nostmesh identity import` | Uses a Nostr key you already have |
+| `nostmesh peer add` / `list` / `remove` | Manages manually configured peers |
+| `nostmesh sessions` | Lists authorized peers and any active sessions |
+| `nostmesh up` / `down` | Brings a manual tunnel up or removes it |
+| `nostmesh connect` / `disconnect` | Opens or closes one session by hand |
+| `nostmesh serve` | The long-running service; systemd starts this for you |
+| `nostmesh relay-check` | Checks that real relays accept this protocol |
+| `nostmesh version` | Build information |
 
-How the identity works, and how to use a Nostr identity you already have, is in
-[docs/identity.md](docs/identity.md).
+Every command takes `--help`.
+
+## When something does not work
+
+Two commands answer most of it:
+
+**`nostmesh doctor`** checks the prerequisites — the module, the identity, the
+relays, the clock, the permissions — and tells you which one is missing.
+
+**`nostmesh policy explain --peer <key>`** answers "why will this peer not
+connect". The distinction that matters: *no rule matched* means nothing
+authorizes them and you need to write a rule; a named rule with
+*action not permitted* means the rule exists and needs widening.
+
+The [troubleshooting guide](docs/troubleshooting.md) covers the rest, in the
+order problems usually appear.
+
+## How it decides who may connect
+
+**Nobody, until you say so.** A machine with no rules connects to nothing, and a
+valid signature proves who is asking — never that they may.
+
+What a peer sends is a **proposal**. Which addresses to route, which subnets to
+accept, what goes in the firewall: all of that comes from your configuration.
+Nothing arriving over the network configures your machine directly.
+
+That is why authorizing somebody is two decisions, not one: *may they connect*,
+and *what may they reach*.
+
+## Documentation
+
+| | |
+|---|---|
+| [Configuration reference](docs/configuration.md) | Every setting, its default, what it does |
+| [Example configurations](examples/scenarios/) | Working files for common setups |
+| [Troubleshooting](docs/troubleshooting.md) | Symptoms, and the command that answers each |
+| [Security model](docs/security-model.md) | What it defends against, and what it does not |
+| [Releasing](docs/releasing.md) | What each release contains and how it is built |
+| [Manual tunnel tutorial](docs/tutorial-manual-tunnel.md) | Two machines, no Nostr |
+| [Nostr tunnel tutorial](docs/tutorial-nostr-tunnel.md) | Two machines finding each other |
+
+For how it is built: [architecture decisions](docs/adr/),
+[protocol](docs/protocol/v1.md), [development](docs/development.md).
+
+## What NostMesh is not
+
+- **Not an anonymity network.** Your relays see your identity's traffic pattern,
+  and nothing is padded or delayed to hide it.
+- **Not a VPN service.** There is nothing to subscribe to.
+- **Not audited.** See the [security model](docs/security-model.md) for what is
+  and is not defended against.
+- **Not a Nostr transport.** Your packets go over WireGuard; Nostr carries only
+  the negotiation.
 
 ## Roadmap
 
 | Stage | Delivers |
 |---|---|
-| **MVP 0** ✅ | Foundation and manual WireGuard tunnel between two Linux hosts |
+| **MVP 0** ✅ | Foundation and a manual tunnel between two Linux machines |
 | **MVP 1** ✅ | Nostr control plane, NAT traversal, direct connection |
-| MVP 2 | Mesh, local policy, private route announcements |
-| MVP 3 | Data relay fallback for symmetric NAT |
-| MVP 4 | Free transit and exit, with NAT, quotas and QoS |
-| MVP 5 | Paid transit over Lightning, local reputation |
+| **MVP 2** ✅ | Several machines, local policy, private route announcements |
+| MVP 3 | Relay fallback for networks that cannot connect directly |
+| MVP 4 | Sharing an Internet connection, with limits and quotas |
+| MVP 5 | Paid transit over Lightning |
 
 A stage begins only after the previous one has a reproducible demo, green tests,
 and documented limitations.
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
-opening a pull request — it covers the development environment, the branch and
-PR workflow, and the conventions every change is expected to follow.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first — it covers the development
+environment, the architecture rules CI enforces, and what a change is expected
+to look like.
 
-Two points worth stating up front:
+Build and test run in containers, so you need no local Go toolchain:
 
-**AI tools are welcome.** Use whatever helps you work. What matters is the
-result: you understand the code, you can defend every decision in it, and you
-are responsible for it. Contributions are judged on their merit, never on how
-they were produced.
-
-**No AI attribution in the repository.** Commits, code comments, branch names,
-pull requests and documentation never mention AI assistants, models or tools —
-no co-author trailers, no "generated with" footers. The commit history records
-what changed and why, not what tooling was open at the time. See
-[CONTRIBUTING.md](CONTRIBUTING.md#no-tooling-attribution) for the reasoning.
+```bash
+make docker-check     # format, vet, tests, portability
+make docker-lint      # linter, pinned to the CI version
+make docker-build     # produces bin/nostmesh
+```
 
 ## Security
 
-Do not open a public issue for a vulnerability. See
-[SECURITY.md](SECURITY.md) for how to report one.
+Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
 
 This project has not been audited. Do not rely on it to protect anything that
 matters until it has been.
