@@ -52,4 +52,4 @@ and which milestones are affected. Compatibility is never broken silently.
 | [NM-23](NM-23-pinning-external-versions.md) | Pinning external versions | Accepted |
 | [NM-24](NM-24-policy-decisions-carry-limits.md) | Policy decisions carry limits | Accepted |
 | [NM-25](NM-25-route-announcements.md) | Route announcements are proposals, and routes are their own operation | Accepted |
-| [NM-26](NM-26-devices-and-published-manifests.md) | Devices, published manifests, and where configuration lives | Proposed |
+| [NM-26](NM-26-devices-and-published-manifests.md) | Devices, published manifests, and where configuration lives | Accepted |

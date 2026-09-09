@@ -1,6 +1,6 @@
 # NM-26 — Devices, published manifests, and where configuration lives
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-08
 **Milestone:** MVP 3
 **Resolves:** #60 — whether one Nostr identity may cover several devices
