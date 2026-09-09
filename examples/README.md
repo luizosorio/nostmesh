@@ -7,6 +7,13 @@ peer. Validate it directly:
 nostmesh config validate examples/nostmesh.json
 ```
 
+**Looking for a setup like yours?** [`scenarios/`](scenarios/) has working files
+for the common ones — your own machines, sharing with one person, reaching a
+home network, a team with groups, and a tunnel with no Nostr at all.
+
+Every setting is documented in the
+[configuration reference](../docs/configuration.md).
+
 ## What to change
 
 | Field | Replace with |

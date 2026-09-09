@@ -1,0 +1,57 @@
+{
+  "node": {
+    "name": "app-server",
+    "state_dir": "/var/lib/nostmesh",
+    "overlay_address": "100.96.1.5/32",
+    "listen_port": 51820,
+    "relays": [
+      "wss://relay.damus.io",
+      "wss://nos.lol",
+      "wss://relay.snort.social"
+    ],
+    "observers": [
+      "stun.l.google.com:19302",
+      "stun.cloudflare.com:3478"
+    ]
+  },
+
+  "log": {
+    "level": "info",
+    "format": "json",
+    "file": "/var/log/nostmesh/nostmesh.log"
+  },
+
+  "policy": {
+    "default_action": "deny",
+    "accept_default_route": false,
+    "max_sessions": 128,
+    "groups": [
+      {
+        "name": "engineers",
+        "members": [
+          "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+          "112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00",
+          "223344556677889900aabbccddeeff112233445566778899aabbccddeeff0011"
+        ],
+        "actions": ["session"],
+        "allowed_ips": ["100.96.1.5/32"]
+      },
+      {
+        "name": "monitoring",
+        "members": [
+          "334455667788990011aabbccddeeff223344556677889900aabbccddeeff1122"
+        ],
+        "actions": ["session"],
+        "allowed_ips": ["100.96.1.5/32"]
+      }
+    ],
+    "authorized_peers": [
+      {
+        "public_key": "445566778899001122aabbccddeeff334455667788990011aabbccddeeff2233",
+        "alias": "former-contractor",
+        "actions": ["session"],
+        "revoked": true
+      }
+    ]
+  }
+}

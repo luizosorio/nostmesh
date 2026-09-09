@@ -1,0 +1,38 @@
+{
+  "node": {
+    "name": "laptop",
+    "state_dir": "/var/lib/nostmesh",
+    "overlay_address": "100.96.0.1/32",
+    "listen_port": 51820,
+    "relays": [
+      "wss://relay.damus.io",
+      "wss://nos.lol",
+      "wss://relay.snort.social"
+    ],
+    "observers": [
+      "stun.l.google.com:19302",
+      "stun.cloudflare.com:3478"
+    ]
+  },
+
+  "log": {
+    "level": "info",
+    "format": "json"
+  },
+
+  "policy": {
+    "default_action": "deny",
+    "max_sessions": 64,
+    "groups": [
+      {
+        "name": "my-devices",
+        "members": [
+          "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+          "112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00"
+        ],
+        "actions": ["session"],
+        "allowed_ips": ["100.96.0.0/24"]
+      }
+    ]
+  }
+}
