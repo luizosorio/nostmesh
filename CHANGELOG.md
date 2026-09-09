@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-09
+
+**MVP 2: several machines, local policy, and private routes.**
+
+A node now holds sessions with many peers at once, decides who may do what from
+rules it owns, and can offer a private subnet to peers that are allowed to reach
+it. Nothing arriving over the network configures a machine.
+
+### Added
+
+- **Several peers at once.** Each session gets its own interface and UDP port,
+  derived from the peer's identity so they survive a restart unchanged — a peer
+  that verified a NAT mapping for one port must come back on that port. One
+  shared session table means the session limit counts what it says it counts.
+
+- **Overlay addresses derived from a signed network manifest** (NM-21). The same
+  inputs always give the same address, a collision renumbers deterministically
+  on both sides, and a conflict never installs silently. Choosing addresses by
+  hand still works and is unchanged.
+
+- **Policy decisions carry their limits** (NM-24). "May this peer connect" and
+  "what may it reach" are answered together, so they cannot disagree — before
+  this, one was checked and the other copied. Refusals use a closed vocabulary
+  of reason codes, so a log can be counted and an operator asking twice gets the
+  same answer.
+
+- **Groups.** One rule authorizes several identities, for the case where a set
+  of machines is trusted the same way. The default stays deny: a group is a
+  shorter way to say who is trusted, never a way to skip saying it.
+
+- **`nostmesh policy explain`** answers "why can this peer not connect" without
+  reproducing the conditions. It calls the same decision the service calls, so
+  the explanation cannot drift from the behaviour.
+
+- **Private route announcements** (NM-25). A node offers prefixes it can reach;
+  the receiver validates, asks policy, resolves conflicts and selects one route
+  per destination. Equal offers do not become ECMP, and the loser stays visible.
+
+  Refused before policy is consulted: martians, default routes, anything
+  covering this node's own transport or a relay it depends on, and anything
+  overlapping a network it already reaches.
+
+- **Routes are their own journaled operation.** An announced route can be
+  withdrawn or expire without touching the tunnel carrying it.
+
+- **`nostmesh status` reports the kernel's routing table**, and `nostmesh state`
+  reports the routes this node decided on, with contested destinations named.
+  The two disagreeing is a defect only visible by reading both.
+
+- **`nostmesh doctor` checks advertised routes**, so a prefix every receiver
+  would refuse is caught locally rather than discovered by silence.
+
+- **Releases are built and published from a tag.** `.tar.gz`, `.deb` and `.rpm`
+  for amd64 and arm64, with checksums and an SBOM. The packages create the
+  service account and install the systemd unit, encoding what a runbook had got
+  wrong three times.
+
+- **Documentation for people using it**: a configuration reference, six worked
+  example configurations, a troubleshooting guide, and a security model that
+  states what is *not* defended against.
+
+### Fixed
+
+- **A peer whose public address alternates between sessions.** Only one
+  server-reflexive candidate was produced whatever was configured, and a node
+  with a single observer had no way to notice the condition. Identical
+  observations no longer become duplicate candidates, disagreement is reported,
+  and a node with one observer says it cannot detect this.
+
+- **A restarted node answered its own retained relay events.** The record of
+  answered sessions lived only in memory, so a node with a durable identity met
+  its own signalling again and treated it as new. It is now persisted, bounded
+  by the same validity window that bounds an envelope.
+
+- **A peer presenting this node's own identity stalled silently.** Role
+  resolution compares the two keys, so with one key on both sides neither side
+  initiates and both wait forever. Refused now with a named reason.
+
+- **`SHA256SUMS` could not verify what was published.** Package versions were
+  rendered with a tilde, which GitHub rewrites in asset names, so the checksum
+  file named files that did not exist.
+
+- **The license checker was installed unpinned**, against the project's own rule
+  that everything external is referenced by an identifier that cannot change.
+
+### Decided
+
+- **NM-26** — how one person's several devices share an identity, and where a
+  node's configuration lives. A decision, not an implementation: it targets MVP
+  3.
+
+### Known limitations
+
+- Two nodes both behind symmetric NAT still cannot connect directly. A data
+  relay arrives in MVP 3.
+- Signalling has no forward secrecy (NM-10): a Nostr key compromised later
+  decrypts retained signalling, revealing endpoints, candidates and **public**
+  WireGuard keys.
+- The development keystore holds the identity key on disk unencrypted. The
+  interface for an external signer exists; no backend implements it.
+- Release artifacts are not signed. The checksums prove an artifact was not
+  corrupted in transit, not who built it.
+
 ## [0.2.3] — 2026-09-05
 
 **A peer that changes address keeps its session.**
