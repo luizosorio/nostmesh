@@ -1,0 +1,42 @@
+{
+  "node": {
+    "name": "home-gateway",
+    "state_dir": "/var/lib/nostmesh",
+    "overlay_address": "100.96.0.10/32",
+    "listen_port": 51820,
+    "mtu": 1420,
+    "relays": [
+      "wss://relay.damus.io",
+      "wss://nos.lol",
+      "wss://relay.snort.social"
+    ],
+    "observers": [
+      "stun.l.google.com:19302",
+      "stun.cloudflare.com:3478"
+    ]
+  },
+
+  "log": {
+    "level": "info",
+    "format": "json"
+  },
+
+  "policy": {
+    "default_action": "deny",
+    "accept_default_route": false,
+    "max_sessions": 64,
+    "authorized_peers": [
+      {
+        "public_key": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "alias": "laptop",
+        "actions": ["session"],
+        "allowed_ips": ["100.96.0.1/32"]
+      }
+    ]
+  },
+
+  "routes": {
+    "advertise": ["192.168.1.0/24"],
+    "metric": 10
+  }
+}
